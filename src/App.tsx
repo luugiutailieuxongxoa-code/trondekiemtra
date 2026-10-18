@@ -6,6 +6,7 @@ import {
   Plus, RefreshCw, Search, Settings2, ShieldCheck, Shuffle, Smartphone, Sparkles,
   Table2, Trash2, Upload, X
 } from "lucide-react";
+import { apiFetch } from "./services/api";
 
 type QuestionType = "multiple_choice" | "true_false" | "short_answer" | "essay";
 type Level = "Biết" | "Hiểu" | "Vận dụng";
@@ -188,10 +189,8 @@ export default function App() {
         setQuestions(prev => [...prev, ...normalized]);
         setToast(`Đã nhập ${normalized.length} câu hỏi từ JSON.`);
       } else if (file.name.toLowerCase().endsWith(".docx")) {
-        const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
         const form = new FormData(); form.append("file", file);
-        const response = await fetch(`${apiBase}/api/exams/parse`, { method: "POST", body: form });
-        if (!response.ok) throw new Error("Không gọi được backend DOCX. Kiểm tra VITE_API_BASE_URL và backend.");
+        const response = await apiFetch("/api/exams/parse", { method: "POST", body: form });
         const result = await response.json() as { questions?: Question[]; question_count?: number; warnings?: string[] };
         if (result.questions?.length) setQuestions(prev => [...prev, ...result.questions!.map((q, i) => ({ ...q, id: q.id || `Q-DOCX-${Date.now()}-${i}`, number: prev.length + i + 1 }))]);
         setToast(`Nhận diện sơ bộ ${result.question_count ?? result.questions?.length ?? 0} câu. Cần đối chiếu công thức, hình và bảng với bản gốc.`);
