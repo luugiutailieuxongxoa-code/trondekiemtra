@@ -59,3 +59,76 @@ def test_pdf_is_rejected_with_clear_message():
 def test_mix_rejects_empty_question_list():
     response = client.post("/api/exams/mix", json={"questions": [], "mode": "g3", "code_count": 2})
     assert response.status_code == 422
+
+
+def make_two_question_docx() -> bytes:
+    doc = Document()
+    doc.add_paragraph("SỞ GIÁO DỤC VÀ ĐÀO TẠO")
+    doc.add_paragraph("Câu 1. Câu thứ nhất?")
+    doc.add_paragraph("A. Đáp án A")
+    doc.add_paragraph("B. Đáp án B")
+    doc.add_paragraph("Câu 2. Câu thứ hai?")
+    doc.add_paragraph("A. Đáp án C")
+    doc.add_paragraph("B. Đáp án D")
+    doc.add_paragraph("HẾT")
+    buffer = BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
+
+def test_export_docx_preserves_source_and_reorders_questions():
+    response = client.post(
+        "/api/exams/export-docx?question_order=%5B%22Q-DOCX-P0-2%22%2C%22Q-DOCX-P0-1%22%5D",
+        files={"file": ("sample.docx", make_two_question_docx(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    exported = Document(BytesIO(response.content))
+    text = "\n".join(p.text for p in exported.paragraphs)
+    assert "Câu 1. Câu thứ hai?" in text
+    assert "Câu 2. Câu thứ nhất?" in text
+    assert text.index("Câu 1. Câu thứ hai?") < text.index("Câu 2. Câu thứ nhất?")
+    assert "SỞ GIÁO DỤC VÀ ĐÀO TẠO" in text
+    assert "HẾT" in text
+
+
+def test_export_docx_allows_exporting_selected_question_subset():
+    response = client.post(
+        "/api/exams/export-docx?question_order=%5B%22Q-DOCX-P0-2%22%5D",
+        files={"file": ("sample.docx", make_two_question_docx(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    exported = Document(BytesIO(response.content))
+    text = "\n".join(p.text for p in exported.paragraphs)
+    assert "Câu 1. Câu thứ hai?" in text
+    assert "Câu thứ nhất?" not in text
+    assert "HẾT" in text
+
+
+
+def test_parser_uses_unique_ids_when_question_numbers_repeat_between_sections():
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Trắc nghiệm")
+    doc.add_paragraph("Câu 1. Câu phần một?")
+    doc.add_paragraph("A. Có")
+    doc.add_paragraph("B. Không")
+    doc.add_paragraph("PHẦN II. Đúng sai")
+    doc.add_paragraph("Câu 1. Câu phần hai?")
+    doc.add_paragraph("a) Ý thứ nhất")
+    buffer = BytesIO()
+    doc.save(buffer)
+    response = client.post(
+        "/api/exams/parse",
+        files={"file": ("sections.docx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    questions = response.json()["questions"]
+    assert [q["id"] for q in questions] == ["Q-DOCX-PI-1", "Q-DOCX-PII-1"]
+
+
+def test_export_docx_rejects_unknown_question_order():
+    response = client.post(
+        "/api/exams/export-docx?question_order=%5B%22Q-DOCX-999%22%5D",
+        files={"file": ("sample.docx", make_two_question_docx(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 422
