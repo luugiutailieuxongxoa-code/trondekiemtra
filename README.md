@@ -120,3 +120,11 @@ pytest -q
 ```
 
 Trước khi sử dụng đề thi chính thức, hãy mở DOCX xuất bằng Microsoft Word/LibreOffice và so sánh lần lượt công thức, hình, bảng, phân phần và đáp án với bản gốc.
+
+## Giai đoạn 4 — nhập đề gốc, nhận diện phần và trộn trực tiếp
+
+- Khi tải DOCX, giao diện thay bộ dữ liệu demo bằng câu hỏi nhận diện từ chính tệp vừa tải, hiển thị số câu, số phần, hình/đồ họa và bảng.
+- Nguồn DOCX được giữ trong phiên trình duyệt để gọi endpoint `POST /api/exams/export-docx`; file xuất được tạo từ DOCX nguồn thay vì dựng lại từ văn bản xem trước.
+- Với DOCX nguồn, hiện bật `g0` (giữ thứ tự) và `g1` (đảo câu trong từng phần). `g2`/`g3` bị khóa để không giả vờ đảo phương án khi chưa đồng bộ đáp án và nhãn phương án trong XML gốc.
+- Cần mở DOCX xuất ra bằng Microsoft Word/LibreOffice và kiểm tra thủ công công thức, hình, bảng, tiêu đề phần, đáp án. Parser hiện nhận diện chủ yếu các tiêu đề dạng `PHẦN I` và `Câu 1.` nằm trong các đoạn văn cấp thân tài liệu; câu hỏi nằm trong hộp văn bản hoặc bảng phức tạp có thể chưa được nhận diện.
+- PDF/OCR, đảo phương án A-D bảo toàn đáp án, làm sạch dấu đáp án đúng và xuất PDF chưa triển khai trong giai đoạn này.
