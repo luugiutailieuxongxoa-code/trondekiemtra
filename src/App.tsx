@@ -244,13 +244,24 @@ export default function App() {
     try {
       const order = mixedCodes[activeCode].map(q => q.id);
       const form = new FormData(); form.append("file", sourceDocx);
-      const response = await apiFetch(`/api/exams/export-docx?question_order=${encodeURIComponent(JSON.stringify(order))}`, { method: "POST", body: form });
+      const header = {
+        department: "SỞ GD&ĐT ĐỒNG NAI",
+        school: "THPT THỐNG NHẤT B",
+        exam_title: "ĐỀ KIỂM TRA",
+        grade: "[KHỐI/LỚP]",
+        school_year: "[NĂM HỌC]",
+        subject: "[MÔN THI]",
+        duration: "[THỜI GIAN LÀM BÀI] phút",
+        exam_code: String(activeCode + 1).padStart(3, "0"),
+      };
+      const params = new URLSearchParams({ question_order: JSON.stringify(order), header: JSON.stringify(header) });
+      const response = await apiFetch(`/api/exams/export-docx?${params.toString()}`, { method: "POST", body: form });
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = `${sourceDocx.name.replace(/\.docx$/i, "")}-ma-de-${String(activeCode + 1).padStart(3, "0")}.docx`;
       document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-      setToast(`Đã tải DOCX mã đề ${String(activeCode + 1).padStart(3, "0")}. Hãy mở file và đối chiếu hình, công thức, bảng với đề gốc.`);
+      setToast(`Đã tải DOCX mã đề ${String(activeCode + 1).padStart(3, "0")}: đã thêm khung tiêu đề, xóa ký hiệu g và gỡ định dạng đánh dấu đáp án. Hãy kiểm tra file trước khi in.`);
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Không thể xuất DOCX từ đề gốc.");
     } finally {
