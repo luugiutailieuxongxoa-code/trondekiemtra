@@ -217,10 +217,13 @@ def test_export_docx_adds_official_header_and_removes_g_markers_and_answer_marks
     assert "ĐA:15" not in all_text
     assert "Câu 1: A" not in all_text
     option = next(p for p in out.paragraphs if p.text.startswith("A. Đáp án có đánh dấu"))
-    run = option.runs[0]
-    assert not run.bold
-    assert not run.underline
-    assert run.font.color.rgb is None
+    label_run = option.runs[0]
+    assert label_run.text == "A."
+    assert label_run.bold is True
+    content_runs = [run for run in option.runs[1:] if run.text.strip()]
+    assert content_runs and not content_runs[0].bold
+    assert not content_runs[0].underline
+    assert content_runs[0].font.color.rgb is None
 
 
 def test_export_removes_A_value_lines_only_in_short_answer_section_and_adds_footer_page_field():
@@ -296,3 +299,42 @@ def test_export_g3_shuffles_labeled_option_paragraphs_and_relabels_them():
     assert [p[0] for p in options] == ["A", "B", "C", "D"]
     assert {p[3:] for p in options} == {"OPTION_ALPHA", "OPTION_BETA", "OPTION_GAMMA", "OPTION_DELTA"}
     assert response.headers["x-ymp-option-paragraphs-shuffled"] == "4"
+
+
+def test_export_normalizes_duplicate_option_labels_and_bolds_labels_only():
+    from zipfile import ZipFile
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Câu trắc nghiệm nhiều phương án lựa chọn")
+    doc.add_paragraph("Câu 1. Chọn phát biểu đúng?")
+    doc.add_paragraph("A. Phương án một\tD. Phương án bốn")
+    doc.add_paragraph("B. Phương án hai\tB. Phương án ba")
+    doc.add_paragraph("PHẦN II. Câu trắc nghiệm đúng sai")
+    doc.add_paragraph("Câu 1. Xét các phát biểu")
+    doc.add_paragraph("a) Phát biểu a\tb) Phát biểu b")
+    doc.add_paragraph("c) Phát biểu c\td) Phát biểu d")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("duplicate-labels.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"section_modes": '{"PI":"g0","PII":"g0"}'},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    q1 = next(i for i,p in enumerate(out.paragraphs) if p.text.startswith("Câu 1. Chọn"))
+    option_paras = [p for p in out.paragraphs[q1+1:] if p.text.startswith(("A.","B.","C.","D."))]
+    text = " ".join(p.text for p in option_paras)
+    assert "A. Phương án một" in text
+    assert "B. Phương án bốn" in text
+    assert "C. Phương án hai" in text
+    assert "D. Phương án ba" in text
+    for paragraph in option_paras:
+        label = next(r for r in paragraph.runs if r.text.strip())
+        assert label.bold is True
+    tf_paras = [p for p in out.paragraphs if p.text.startswith(("a)","b)","c)","d)"))]
+    assert tf_paras
+    for paragraph in tf_paras:
+        label = next(r for r in paragraph.runs if r.text.strip())
+        assert label.bold is True
+    with ZipFile(BytesIO(response.content)) as archive:
+        settings = archive.read("word/settings.xml").decode("utf-8")
+    assert 'updateFields w:val="true"' in settings or 'w:updateFields w:val="true"' in settings
