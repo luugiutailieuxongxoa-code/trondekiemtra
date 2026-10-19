@@ -72,6 +72,15 @@ async def request_logging(request: Request, call_next):
         )
 
 
+@app.get("/api/templates/source-exam")
+def download_source_exam_template():
+    """Download the editable DOCX template for authoring original exams."""
+    template = Path(__file__).parent / "templates" / "Mau_de_goc_Young_Mix_Pro.docx"
+    if not template.exists():
+        raise HTTPException(status_code=404, detail="Chưa có file mẫu đề gốc.")
+    return FileResponse(template, filename="Mau_de_goc_Young_Mix_Pro.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
