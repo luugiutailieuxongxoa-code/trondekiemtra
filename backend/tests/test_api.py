@@ -338,3 +338,44 @@ def test_export_normalizes_duplicate_option_labels_and_bolds_labels_only():
     with ZipFile(BytesIO(response.content)) as archive:
         settings = archive.read("word/settings.xml").decode("utf-8")
     assert 'updateFields w:val="true"' in settings or 'w:updateFields w:val="true"' in settings
+
+
+def test_export_restores_true_false_subitems_to_label_order_without_shuffling_content():
+    doc = Document()
+    doc.add_paragraph("PHẦN II. Câu trắc nghiệm đúng sai")
+    doc.add_paragraph("Câu 1. Xét các phát biểu")
+    doc.add_paragraph("d) NOI_DUNG_D")
+    doc.add_paragraph("c) NOI_DUNG_C")
+    doc.add_paragraph("a) NOI_DUNG_A")
+    doc.add_paragraph("b) NOI_DUNG_B")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("tf-order.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"section_modes": '{"PII":"g0"}'},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    items = [p.text for p in out.paragraphs if re.match(r"^[a-d][.)]", p.text)]
+    assert items == ["a) NOI_DUNG_A", "b) NOI_DUNG_B", "c) NOI_DUNG_C", "d) NOI_DUNG_D"]
+
+
+def test_export_does_not_shuffle_true_false_items_by_g3_mode():
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN II. Câu trắc nghiệm đúng sai")
+    doc.add_paragraph("Câu 1. Xét các phát biểu")
+    doc.add_paragraph("a) NOI_DUNG_A")
+    doc.add_paragraph("b) NOI_DUNG_B")
+    doc.add_paragraph("c) NOI_DUNG_C")
+    doc.add_paragraph("d) NOI_DUNG_D")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("tf-g3.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"seed": "42"},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    items = [p.text for p in out.paragraphs if re.match(r"^[a-d][.)]", p.text)]
+    assert items == ["a) NOI_DUNG_A", "b) NOI_DUNG_B", "c) NOI_DUNG_C", "d) NOI_DUNG_D"]
