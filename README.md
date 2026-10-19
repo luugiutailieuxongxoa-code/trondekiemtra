@@ -175,3 +175,16 @@ Lưu ý: quy tắc loại `A. ...` dựa vào tiêu đề phần có cụm “tr
 - If a true/false group is incomplete or ambiguous, it is not guessed/relabelled; review the warning before using the export.
 
 Backend tests: 18 passed.
+
+
+## Bản vá xuất DOCX — tổng số trang và an toàn nhãn phương án
+
+- Backend loại bỏ phần tiêu đề Young Mix Pro cũ đã nhận diện trước khi thêm tiêu đề mới, tránh xuất hai tiêu đề và giữ lại môn thi cũ không khớp.
+- Giao diện không còn tự điền mặc định `HÓA HỌC` và `45 phút`; môn thi và thời gian để trống để người dùng nhập đúng theo đề gốc, tránh xuất đề Toán nhưng tiêu đề ghi Hóa học.
+- Nhãn A/B/C/D chỉ được chuẩn hóa khi nhận diện đúng 4 nhãn trong khối câu. Nếu số lượng nhãn thiếu/thừa hoặc mơ hồ, hệ thống giữ nhãn hiện có và trả cảnh báo, không dùng phép chia dư để tạo nhãn lặp.
+- Các tiểu ý a), b), c), d) được xử lý tách biệt; hệ thống không coi chúng là phương án A/B/C/D. Nhóm tiểu ý không đủ 4 nhãn được giữ nguyên và cảnh báo.
+- Dòng `Đề thi gồm N trang` được cập nhật trước khi tải xuống khi máy chủ có LibreOffice Writer và `pdfinfo`. Backend kết xuất DOCX tạm sang PDF để đếm trang, ghi giá trị cache vào trường `NUMPAGES`, rồi kiểm tra lại số trang. Nếu công cụ hệ thống không khả dụng, Word vẫn có trường `NUMPAGES` để cập nhật khi mở file; API sẽ báo `X-YMP-Page-Count-Method: word-field-fallback`.
+- Trên Render, `backend/apt.txt` cài `libreoffice-writer`, `poppler-utils` và các font cơ bản. Sau khi cập nhật repository, cần chờ Render build/deploy hoàn tất và kiểm tra response header `X-YMP-Total-Pages`. Do giao diện cũng đã đổi mặc định tiêu đề, cần chờ Vercel triển khai lại.
+- Bài kiểm thử bao gồm: thay thế tiêu đề cũ, môn thi được cấu hình, nhãn trùng, số nhãn mơ hồ, và tài liệu nhiều trang.
+
+**Giới hạn:** Nếu tệp nguồn đã bị hỏng trước đó (ví dụ nhãn phương án đã bị thay và công thức bị tách khỏi phương án), phần mềm không thể suy ra chắc chắn cấu trúc gốc chỉ từ nội dung hỏng. Hãy dùng file DOCX gốc chưa qua lần xuất lỗi để tạo lại đề chính thức.
