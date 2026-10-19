@@ -165,3 +165,13 @@ Lưu ý: quy tắc loại `A. ...` dựa vào tiêu đề phần có cụm “tr
 - Bold only the visible A./B./C./D. and a)/b)/c)/d) markers where the labels are separate Word text runs; preserve formula/image/object XML.
 - Set Word's `updateFields` setting so PAGE and NUMPAGES fields are refreshed when the document is opened in a Word-compatible editor. The final page count still depends on the editor's pagination engine.
 - Backend tests: 16 passed.
+
+## Phase 10 — fix answer labels and true/false item order
+
+- Normalize A/B/C/D labels independently inside each question block, in document reading order, so duplicate labels such as `A, D, B, B` become unique `A, B, C, D` labels.
+- Keep A/B/C/D labels bold.
+- True/false subitems default to a), b), c), d) order. When all four labels are separate, unambiguous paragraphs, the exporter sorts the whole paragraphs by their existing labels, keeping each statement and any inline content together.
+- `g2`/`g3` only shuffle uppercase A-D option paragraphs. Lowercase a)-d) true/false items are never shuffled implicitly, even when a section has `g3`.
+- If a true/false group is incomplete or ambiguous, it is not guessed/relabelled; review the warning before using the export.
+
+Backend tests: 18 passed.
