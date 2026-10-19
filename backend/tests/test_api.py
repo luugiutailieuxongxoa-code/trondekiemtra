@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 import sys
 import re
+from zipfile import ZipFile
 
 from docx import Document
 from fastapi.testclient import TestClient
@@ -379,3 +380,80 @@ def test_export_does_not_shuffle_true_false_items_by_g3_mode():
     out = Document(BytesIO(response.content))
     items = [p.text for p in out.paragraphs if re.match(r"^[a-d][.)]", p.text)]
     assert items == ["a) NOI_DUNG_A", "b) NOI_DUNG_B", "c) NOI_DUNG_C", "d) NOI_DUNG_D"]
+
+
+def test_export_replaces_previous_generated_header_instead_of_duplicating_it():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "SỞ GD&ĐT ĐỒNG NAI\nTHPT THỐNG NHẤT B\nĐề thi gồm 4 trang\nĐỀ THI CHÍNH THỨC"
+    table.cell(0, 1).text = "ĐỀ KIỂM TRA\nMôn: HÓA HỌC\nMã đề: 003"
+    doc.add_paragraph("Họ và tên thí sinh: .................... Số báo danh: ............")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều phương án lựa chọn")
+    doc.add_paragraph("Câu 1. Câu hỏi Toán")
+    for label, content in [("A", "Một"), ("B", "Hai"), ("C", "Ba"), ("D", "Bốn")]:
+        doc.add_paragraph(f"{label}. {content}")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("old-header.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"header": '{"department":"SỞ GD&ĐT ĐỒNG NAI","school":"THPT THỐNG NHẤT B","exam_title":"ĐỀ KIỂM TRA","grade":"10","school_year":"2026-2027","subject":"TOÁN","duration":"90","exam_code":"003"}',
+                "section_modes": '{"PI":"g0"}'},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    all_table_text = "\n".join(cell.text for table in out.tables for row in table.rows for cell in row.cells)
+    assert all_table_text.count("ĐỀ THI CHÍNH THỨC") == 1
+    assert all_table_text.count("Đề thi gồm") == 1
+    assert "Môn: TOÁN" in all_table_text
+    assert "Môn: HÓA HỌC" not in all_table_text
+    assert sum(1 for p in out.paragraphs if "Họ và tên thí sinh" in p.text) == 1
+    assert response.headers.get("x-ymp-source-header-blocks-removed", "0") != "0"
+
+
+def test_export_caches_real_total_page_count_when_server_renderer_exists():
+    from shutil import which
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Kiểm tra số trang")
+    doc.add_paragraph("Câu 1. Nội dung thử nghiệm")
+    doc.add_paragraph("A. Một")
+    doc.add_paragraph("B. Hai")
+    doc.add_paragraph("C. Ba")
+    doc.add_paragraph("D. Bốn")
+    for index in range(180):
+        doc.add_paragraph(f"Đoạn kiểm tra phân trang {index + 1}: " + ("Nội dung kiểm thử để tạo chiều dài trang. " * 8))
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("many-pages.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"section_modes": '{"PI":"g0"}'},
+    )
+    assert response.status_code == 200, response.text
+    total_pages = response.headers.get("x-ymp-total-pages", "unknown")
+    with ZipFile(BytesIO(response.content)) as archive:
+        xml = archive.read("word/document.xml").decode("utf-8")
+    assert "NUMPAGES" in xml
+    if which("libreoffice") and which("pdfinfo"):
+        assert total_pages != "unknown"
+        assert int(total_pages) >= 2
+        assert f"Đề thi gồm {total_pages} trang" in "".join(Document(BytesIO(response.content)).tables[0].cell(0, 0).text.splitlines())
+    else:
+        assert total_pages == "unknown"
+
+
+def test_export_does_not_cycle_labels_when_option_count_is_ambiguous():
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều phương án lựa chọn")
+    doc.add_paragraph("Câu 1. Câu có cấu trúc bất thường")
+    for label, text in [("A", "Một"), ("D", "Bốn"), ("B", "Hai"), ("B", "Ba"), ("C", "Nội dung thừa")]:
+        doc.add_paragraph(f"{label}. {text}")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("ambiguous-options.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"section_modes": '{"PI":"g0"}'},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    options = [p.text for p in out.paragraphs if re.match(r"^[A-D][.)]", p.text)]
+    assert [p[0] for p in options] == ["A", "D", "B", "B", "C"]
+    assert int(response.headers["x-ymp-warning-count"]) >= 1
