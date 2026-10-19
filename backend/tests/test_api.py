@@ -177,3 +177,46 @@ def test_parser_counts_inline_image_in_source_docx():
     body = response.json()
     assert body["image_count"] == 1
     assert body["questions"][0]["has_image"] is True
+
+
+def test_export_docx_adds_official_header_and_removes_g_markers_and_answer_marks():
+    from docx.shared import RGBColor
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều lựa chọn")
+    doc.add_paragraph("Câu 1. Chọn phát biểu đúng?")
+    correct = doc.add_paragraph()
+    run = correct.add_run("A. Đáp án có đánh dấu")
+    run.bold = True
+    run.underline = True
+    run.font.color.rgb = RGBColor(255, 0, 0)
+    doc.add_paragraph("B. Phương án khác")
+    doc.add_paragraph("ĐA:15")
+    doc.add_paragraph("HẾT")
+    doc.add_paragraph("ĐÁP ÁN")
+    doc.add_paragraph("Câu 1: A")
+    buf = BytesIO(); doc.save(buf)
+
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("sample.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"header": '{"department":"SỞ GD&ĐT ĐỒNG NAI","school":"THPT THỐNG NHẤT B","exam_title":"KIỂM TRA CUỐI KỲ","grade":"12","school_year":"2026-2027","subject":"HÓA HỌC","duration":"45","exam_code":"007"}'},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["x-ymp-answer-markings-removed"] == "true"
+    assert response.headers["x-ymp-answer-key-section-removed"] == "true"
+    assert response.headers["x-ymp-parser-markers-removed"] == "true"
+    out = Document(BytesIO(response.content))
+    header_text = " ".join(cell.text for table in out.tables for row in table.rows for cell in row.cells)
+    assert "SỞ GD&ĐT ĐỒNG NAI" in header_text
+    assert "THPT THỐNG NHẤT B" in header_text
+    assert "HÓA HỌC" in header_text
+    all_text = "\n".join(p.text for p in out.paragraphs) + "\n" + header_text
+    assert "<g3>" not in all_text
+    assert "ĐA:15" not in all_text
+    assert "Câu 1: A" not in all_text
+    option = next(p for p in out.paragraphs if p.text.startswith("A. Đáp án có đánh dấu"))
+    run = option.runs[0]
+    assert not run.bold
+    assert not run.underline
+    assert run.font.color.rgb is None
