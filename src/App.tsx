@@ -18,7 +18,7 @@ type Question = {
   text: string; options: Option[]; answer: string | string[] | null; points: number; group: MixMode;
   section?: string; section_title?: string; source_number?: number; has_image?: boolean; has_table?: boolean;
 };
-type ParsedSection = { id: string; title: string; question_count: number; type: string; image_count: number; table_count: number };
+type ParsedSection = { id: string; title: string; question_count: number; question_numbers?: number[]; type: string; group?: MixMode; image_count: number; table_count: number };
 type ParsedDocx = { source_filename: string; question_count: number; image_count: number; table_count: number; sections?: string[]; section_summary: ParsedSection[]; questions: Question[]; warnings: string[] };
 type NavItem = { key: Page; label: string; icon: typeof Home };
 type NavGroup = { name: string; items: NavItem[] };
@@ -122,6 +122,12 @@ export default function App() {
   const [activeCode, setActiveCode] = useState(0);
   const [sourceDocx, setSourceDocx] = useState<File | null>(null);
   const [parsedDocx, setParsedDocx] = useState<ParsedDocx | null>(null);
+  const [sectionModes, setSectionModes] = useState<Record<string, MixMode>>({});
+  const [headerConfig, setHeaderConfig] = useState({
+    department: "SỞ GD&ĐT ĐỒNG NAI", school: "THPT THỐNG NHẤT B",
+    exam_title: "ĐỀ KIỂM TRA", grade: "12", school_year: "2026-2027",
+    subject: "HÓA HỌC", duration: "45 phút"
+  });
   const [isImporting, setIsImporting] = useState(false);
   const [isExportingSource, setIsExportingSource] = useState(false);
   const [toast, setToast] = useState("");
@@ -175,13 +181,15 @@ export default function App() {
         ...q,
         options: !sourceDocx && (mode === "g2" || mode === "g3") && q.type === "multiple_choice" ? shuffle(q.options) : [...q.options]
       }));
-      if (mode === "g1" || (!sourceDocx && mode === "g3")) {
-        if (sourceDocx) {
-          // Shuffle questions within each section only. Never move a question across parts.
-          const sections = [...new Set(list.map(q => q.section ?? "P0"))];
-          list = sections.flatMap(section => shuffle(list.filter(q => (q.section ?? "P0") === section)));
-        } else list = shuffle(list);
-      }
+      if (sourceDocx) {
+        // Respect the marker-derived or teacher-overridden mode independently for each part.
+        const sections = [...new Set(list.map(q => q.section ?? "P0"))];
+        list = sections.flatMap(section => {
+          const sectionMode = sectionModes[section] ?? list.find(q => (q.section ?? "P0") === section)?.group ?? "g0";
+          const sectionQuestions = list.filter(q => (q.section ?? "P0") === section);
+          return sectionMode === "g1" || sectionMode === "g3" ? shuffle(sectionQuestions) : sectionQuestions;
+        });
+      } else if (mode === "g1" || mode === "g3") list = shuffle(list);
       output.push(list.map((q, i) => ({ ...q, number: i + 1 })));
     }
     setMixedCodes(output); setActiveCode(0); setPage("mixer");
@@ -215,12 +223,13 @@ export default function App() {
         const normalized = result.questions.map((q, i) => ({
           ...q, id: q.id || `Q-DOCX-${Date.now()}-${i}`, number: i + 1,
           type: q.type ?? "multiple_choice", topic: q.topic ?? "Chưa phân loại", level: q.level ?? "Biết",
-          text: q.text ?? "", options: q.options ?? [], answer: q.answer ?? null, points: q.points ?? 0, group: "g0" as MixMode
+          text: q.text ?? "", options: q.options ?? [], answer: q.answer ?? null, points: q.points ?? 0, group: (q.group ?? "g0") as MixMode
         }));
         setQuestions(normalized); // A source DOCX replaces demo data; do not mix unrelated seed questions.
         setSourceDocx(file);
         setParsedDocx({ ...result, source_filename: result.source_filename ?? file.name, questions: normalized });
         setMode("g0");
+        setSectionModes(Object.fromEntries((result.section_summary ?? []).map((section: ParsedSection) => [section.id, section.group ?? "g0"])) as Record<string, MixMode>);
         setMixedCodes([]); setActiveCode(0);
         setQuestionCount(normalized.length);
         setPage("mixer");
@@ -244,17 +253,8 @@ export default function App() {
     try {
       const order = mixedCodes[activeCode].map(q => q.id);
       const form = new FormData(); form.append("file", sourceDocx);
-      const header = {
-        department: "SỞ GD&ĐT ĐỒNG NAI",
-        school: "THPT THỐNG NHẤT B",
-        exam_title: "ĐỀ KIỂM TRA",
-        grade: "[KHỐI/LỚP]",
-        school_year: "[NĂM HỌC]",
-        subject: "[MÔN THI]",
-        duration: "[THỜI GIAN LÀM BÀI] phút",
-        exam_code: String(activeCode + 1).padStart(3, "0"),
-      };
-      const params = new URLSearchParams({ question_order: JSON.stringify(order), header: JSON.stringify(header) });
+      const header = { ...headerConfig, exam_code: String(activeCode + 1).padStart(3, "0") };
+      const params = new URLSearchParams({ question_order: JSON.stringify(order), header: JSON.stringify(header), section_modes: JSON.stringify(sectionModes), seed: String(activeCode + 1) });
       const response = await apiFetch(`/api/exams/export-docx?${params.toString()}`, { method: "POST", body: form });
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -336,16 +336,21 @@ export default function App() {
           </section>}
           {!sourceDocx && <section className="panel source-upload-panel"><div><CloudUpload size={25}/><h2>Bắt đầu bằng đề Word gốc</h2><p>Tải DOCX mẫu lên để nhận diện các phần, câu hỏi, hình và bảng; sau đó tạo thứ tự trộn và xuất lại từ chính file gốc.</p></div><button className="btn primary" onClick={() => fileInput.current?.click()} disabled={isImporting}><Upload size={16}/>{isImporting ? "Đang nhận diện..." : "Tải đề Word gốc"}</button></section>}
           <div className="mixlayout"><section className="panel mixsettings"><PanelHead title="Cấu hình trộn" desc={sourceDocx ? "Áp dụng cho đề Word gốc đã tải" : "Áp dụng cho ngân hàng hiện tại"}/>
-            <label className="field">Tên kỳ kiểm tra<input defaultValue="Kiểm tra định kỳ — Hóa học 12"/></label>
-            <div className="fieldrow"><label className="field">Môn học<select defaultValue="Hóa học"><option>Hóa học</option><option>Toán học</option><option>Vật lí</option><option>Lịch sử</option><option>Địa lí</option></select></label><label className="field">Thời gian<input type="number" defaultValue="45" min="1"/></label></div>
-            <label className="field">Quy tắc trộn</label><div className="modes">{[
+            <details className="header-settings" open>
+              <summary><b>Cài đặt tiêu đề xuất DOCX</b></summary>
+              <label className="field">Tên kỳ kiểm tra<input value={headerConfig.exam_title} onChange={e => setHeaderConfig(prev => ({...prev, exam_title:e.target.value}))}/></label>
+              <div className="fieldrow"><label className="field">Sở GD&ĐT<input value={headerConfig.department} onChange={e => setHeaderConfig(prev => ({...prev, department:e.target.value}))}/></label><label className="field">Trường<input value={headerConfig.school} onChange={e => setHeaderConfig(prev => ({...prev, school:e.target.value}))}/></label></div>
+              <div className="fieldrow"><label className="field">Môn thi<input value={headerConfig.subject} onChange={e => setHeaderConfig(prev => ({...prev, subject:e.target.value}))}/></label><label className="field">Thời gian<input value={headerConfig.duration} onChange={e => setHeaderConfig(prev => ({...prev, duration:e.target.value}))}/></label></div>
+              <div className="fieldrow"><label className="field">Khối/lớp<input value={headerConfig.grade} onChange={e => setHeaderConfig(prev => ({...prev, grade:e.target.value}))}/></label><label className="field">Năm học<input value={headerConfig.school_year} onChange={e => setHeaderConfig(prev => ({...prev, school_year:e.target.value}))}/></label></div>
+            </details>
+            {sourceDocx && parsedDocx?.section_summary?.length ? <div className="section-mode-settings"><b>Quy tắc theo từng phần (ưu tiên marker g0–g3 trong đề gốc)</b><p>g0 giữ nguyên · g1 đảo câu · g2 đảo phương án · g3 đảo cả câu và phương án. Có thể đổi từng phần trước khi tạo mã đề.</p>{parsedDocx.section_summary.map(section => <label className="field" key={section.id}>{section.title || section.id}<select value={sectionModes[section.id] ?? section.group ?? "g0"} onChange={e => setSectionModes(prev => ({...prev,[section.id]:e.target.value as MixMode}))}><option value="g0">g0 — Giữ nguyên</option><option value="g1">g1 — Đảo câu</option><option value="g2">g2 — Đảo phương án</option><option value="g3">g3 — Đảo câu và phương án</option></select></label>)}</div> : <><label className="field">Quy tắc trộn</label><div className="modes">{[
               {value:"g0" as MixMode,title:"Giữ nguyên",desc:"Không đảo câu, không đảo đáp án"},
               {value:"g1" as MixMode,title:"Đảo câu",desc:"Đổi thứ tự câu hỏi"},
               {value:"g2" as MixMode,title:"Đảo đáp án",desc:"Đổi phương án trắc nghiệm"},
               {value:"g3" as MixMode,title:"Đảo cả hai",desc:"Đảo câu và phương án"}
-            ].map(item => <button key={item.value} disabled={Boolean(sourceDocx && (item.value === "g2" || item.value === "g3"))} className={mode===item.value?"chosen":""} onClick={() => setMode(item.value)}><span className="radio">{mode===item.value && <i/>}</span><span><b>{item.title}</b><small>{item.desc}</small></span>{mode===item.value && <Check size={15}/>}</button>)}</div>
+            ].map(item => <button key={item.value} className={mode===item.value?"chosen":""} onClick={() => setMode(item.value)}><span className="radio">{mode===item.value && <i/>}</span><span><b>{item.title}</b><small>{item.desc}</small></span>{mode===item.value && <Check size={15}/>}</button>)}</div></>}
             <div className="fieldrow"><label className="field">Số câu<input type="number" value={sourceDocx ? questions.length : questionCount} min="1" max={Math.max(1,questions.length)} disabled={Boolean(sourceDocx)} onChange={e => setQuestionCount(Math.max(1,Math.min(Math.max(1,questions.length),Number(e.target.value)||1)))}/><small>{sourceDocx ? "Giữ toàn bộ câu để bảo toàn cấu trúc đề gốc" : `Tối đa ${questions.length} câu`}</small></label><label className="field">Số mã đề<input type="number" value={codeCount} min="1" max="20" onChange={e => setCodeCount(Math.max(1,Math.min(20,Number(e.target.value)||1)))}/><small>Tối đa 20 mã trong MVP</small></label></div>
-            <div className="warningbox"><AlertTriangle size={16}/> {sourceDocx ? "Hiện hỗ trợ giữ nguyên (g0) hoặc đảo câu trong từng phần (g1). Đảo phương án chưa bật để tránh sai đáp án." : "Đối chiếu công thức, hình ảnh và đáp án với file gốc trước khi phát hành."}</div><button className="btn primary full" onClick={createMixedCodes}><Shuffle size={17}/> {sourceDocx ? "Tạo thứ tự trộn từ đề gốc" : "Tạo mã đề xem trước"}</button>
+            <div className="warningbox"><AlertTriangle size={16}/> {sourceDocx ? "Mỗi phần áp dụng g0–g3 theo marker trong đề gốc hoặc lựa chọn của giáo viên. Đảo phương án chỉ an toàn khi các phương án là các đoạn A./B./C./D. riêng biệt; hãy kiểm tra DOCX và đáp án sau khi xuất." : "Đối chiếu công thức, hình ảnh và đáp án với file gốc trước khi phát hành."}</div><button className="btn primary full" onClick={createMixedCodes}><Shuffle size={17}/> {sourceDocx ? "Tạo thứ tự trộn từ đề gốc" : "Tạo mã đề xem trước"}</button>
           </section>
           <section className="panel preview"><PanelHead title="Xem trước mã đề" desc={mixedCodes.length ? `${mixedCodes.length} mã đề đã tạo` : "Chưa có mã đề trong phiên này"} action={mixedCodes.length ? "Tải JSON" : undefined} onAction={() => downloadJson(`ma-de-${String(activeCode+1).padStart(3,"0")}.json`,{code:String(activeCode+1).padStart(3,"0"),questions:currentCode})}/>
             {mixedCodes.length > 0 ? <>{sourceDocx && <div className="source-export-bar"><div><b>Xuất trực tiếp từ DOCX gốc</b><small>Mã đề {String(activeCode + 1).padStart(3, "0")} · giữ media, công thức và bảng trong gói Word nguồn</small></div><button className="btn primary" onClick={() => void exportSourceDocx()} disabled={isExportingSource}><Download size={15}/>{isExportingSource ? "Đang xuất..." : "Tải DOCX mã đề này"}</button></div>}<div className="tabs">{mixedCodes.map((_,i) => <button className={i===activeCode?"on":""} key={`code-${i}`} onClick={() => setActiveCode(i)}>Mã {String(i+1).padStart(3,"0")}</button>)}</div>{sourceDocx ? <div className="source-preview-note"><FileText size={24}/><b>Bản xem trước văn bản không đại diện đầy đủ cho DOCX</b><p>Công thức, hình, biểu đồ và bảng được giữ trong file Word gốc. Dùng nút “Tải DOCX mã đề này” rồi mở file tải xuống để kiểm tra bố cục thật.</p><div><span>{currentCode.length} câu</span><span>{parsedDocx?.image_count ?? 0} hình/đồ họa nguồn</span><span>{parsedDocx?.table_count ?? 0} bảng nguồn</span></div></div> : <div className="paper"><div className="paperhead"><div><b>TRƯỜNG THPT …………</b><small>ĐỀ THI CHÍNH THỨC</small></div><div><b>KIỂM TRA ĐỊNH KỲ</b><small>Môn: Hóa học · 45 phút</small></div></div><p className="studentline">Họ và tên: .................................... Lớp: ........</p><p className="code">Mã đề: {String(activeCode+1).padStart(3,"0")}</p>{currentCode.map((q,i) => <div className="examq" key={q.id}><p><b>Câu {i+1}.</b> {q.text}</p>{q.type==="multiple_choice" && <div className="examopts">{q.options.map((option,j) => <span key={option.id}><b>{String.fromCharCode(65+j)}.</b> {option.text}</span>)}</div>}{q.type==="true_false" && <div className="examopts tf">{q.options.map((option,j) => <span key={option.id}><b>{String.fromCharCode(97+j)})</b> {option.text}</span>)}</div>}{q.type==="short_answer" && <p className="answerline">................................................................................</p>}{q.type==="essay" && <p className="answerline">................................................................................<br/>................................................................................</p>}</div>)}<div className="end">— HẾT —</div></div>}<div className="answerkey"><b><ShieldCheck size={16}/> Đáp án tham khảo — giáo viên</b><div>{currentCode.map((q,i) => <span key={q.id}>C{i+1}: <b>{getAnswerLabel(q)}</b></span>)}</div><small>Đáp án mẫu chưa được xác minh tự động.</small></div></> : <div className="empty previewempty"><Eye size={26}/><b>Bản xem trước sẽ xuất hiện tại đây</b><small>Chọn quy tắc trộn rồi tạo mã đề.</small><div className="paperfake"><i/><i/><i/><i/></div></div>}
