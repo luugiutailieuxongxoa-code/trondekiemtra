@@ -128,3 +128,13 @@ Trước khi sử dụng đề thi chính thức, hãy mở DOCX xuất bằng M
 - Với DOCX nguồn, hiện bật `g0` (giữ thứ tự) và `g1` (đảo câu trong từng phần). `g2`/`g3` bị khóa để không giả vờ đảo phương án khi chưa đồng bộ đáp án và nhãn phương án trong XML gốc.
 - Cần mở DOCX xuất ra bằng Microsoft Word/LibreOffice và kiểm tra thủ công công thức, hình, bảng, tiêu đề phần, đáp án. Parser hiện nhận diện chủ yếu các tiêu đề dạng `PHẦN I` và `Câu 1.` nằm trong các đoạn văn cấp thân tài liệu; câu hỏi nằm trong hộp văn bản hoặc bảng phức tạp có thể chưa được nhận diện.
 - PDF/OCR, đảo phương án A-D bảo toàn đáp án, làm sạch dấu đáp án đúng và xuất PDF chưa triển khai trong giai đoạn này.
+
+
+## Giai đoạn 5 — Mẫu tiêu đề DOCX và làm sạch đáp án
+
+- Endpoint `POST /api/exams/export-docx` nhận thêm query `header` dạng JSON với các trường `department`, `school`, `exam_title`, `grade`, `school_year`, `subject`, `duration`, `exam_code`.
+- DOCX xuất ra có khung tiêu đề hai cột, dòng mã đề, dòng họ tên/SBD; khổ A4, lề trên/dưới/phải 2 cm, lề trái 2,5 cm và font tiêu đề Times New Roman.
+- Xóa các marker kỹ thuật `<g1>`, `<g2>`, `<g3>` và marker đáp án nội bộ dạng `ĐA:...`.
+- Gỡ các dấu định dạng thường dùng để đánh dấu đáp án đúng (đậm, nghiêng, gạch chân, màu chữ, tô sáng) trên các đoạn phương án A–D. Giữ lại nội dung phương án.
+- Nếu phát hiện tiêu đề phần đáp án riêng (`ĐÁP ÁN`/`ANSWER KEY`), phần từ tiêu đề đó đến cuối tài liệu được bỏ khỏi đề xuất ra.
+- Chưa xuất PDF; cần mở DOCX đầu ra kiểm tra trực quan trước khi sử dụng chính thức.
