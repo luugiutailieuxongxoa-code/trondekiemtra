@@ -22,7 +22,7 @@ END_RE = re.compile(r"\s*(?:[-—– ]*HẾT[-—– ]*|[-—– ]*KẾT THÚC[-
 G_MARKER_RE = re.compile(r"<\s*g\s*\d+\s*>", re.I)
 ANSWER_MARKER_RE = re.compile(r"\bĐA\s*:\s*[^\s;,.]+", re.I)
 ANSWER_KEY_RE = re.compile(r"^\s*(?:ĐÁP ÁN|ĐÁP ÁN THAM KHẢO|ĐÁP ÁN ĐỀ|ANSWER KEY)\b", re.I)
-OPTION_RE = re.compile(r"^\s*[A-D][.)]\s*", re.I)
+OPTION_RE = re.compile(r"^\s*[A-D][.)]\s*")
 SHORT_ANSWER_HEADING_RE = re.compile(r"trả\s*lời\s*ngắn", re.I)
 SHORT_ANSWER_LEAK_RE = re.compile(r"^\s*A\.\s*\S.*$", re.I)
 
@@ -304,6 +304,44 @@ def _bold_label_at_offset(spans, char_offset, replacement: str | None = None) ->
             return True
     return False
 
+
+
+def _restore_true_false_subitem_order(block: list) -> tuple[int, list[str]]:
+    """Restore complete, separately-paragraphed a)-d) groups to label order.
+
+    Each paragraph is moved as a whole, so statement text, inline images/formulas and
+    any answer marker attached to that statement remain together. Incomplete or
+    ambiguous groups are left untouched and reported rather than guessed.
+    """
+    changed = 0
+    warnings: list[str] = []
+    i = 0
+    label_order = {letter: idx for idx, letter in enumerate("abcd")}
+    while i < len(block):
+        if block[i].tag != qn("w:p"):
+            i += 1
+            continue
+        match = re.match(r"^\s*([a-d])[.)](?=\s|$)", _paragraph_text(block[i]), re.I)
+        if not match:
+            i += 1
+            continue
+        start = i
+        group = []
+        while i < len(block) and block[i].tag == qn("w:p"):
+            m = re.match(r"^\s*([a-d])[.)](?=\s|$)", _paragraph_text(block[i]), re.I)
+            if not m:
+                break
+            group.append((m.group(1).lower(), block[i]))
+            i += 1
+        labels = [label for label, _ in group]
+        if len(group) == 4 and set(labels) == set("abcd"):
+            ordered = sorted(group, key=lambda item: label_order[item[0]])
+            if labels != [label for label, _ in ordered]:
+                block[start:i] = [element for _, element in ordered]
+                changed += 1
+        elif len(group) > 1 and labels != sorted(labels, key=lambda x: label_order[x]):
+            warnings.append("Không tự sắp xếp tiểu ý đúng/sai: nhóm a)-d) không đủ 4 nhãn riêng biệt.")
+    return changed, warnings
 
 def _normalize_and_bold_option_labels(block: list) -> tuple[int, int]:
     """Normalize option labels A-D in reading order and bold A-D/a-d labels.
@@ -667,6 +705,11 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                     for new_number, qid in enumerate(chosen, start=1):
                         block = blocks[qid]
                         q_section = next((it["section"] for it in question_starts if it["id"] == qid), sec)
+                        # True/false subitems default to a), b), c), d) order.
+                        # Restore by their existing labels only when a complete, unambiguous
+                        # four-item group is present; never shuffle these items implicitly.
+                        tf_groups_restored, tf_order_warnings = _restore_true_false_subitem_order(block)
+                        warnings.extend(tf_order_warnings)
                         normalized_options, bolded_labels = _normalize_and_bold_option_labels(block)
                         _split_and_style_label_runs(block)
                         if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
@@ -723,6 +766,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "section_modes": effective_modes,
         "option_paragraphs_shuffled": option_shuffle_count,
         "option_labels_normalized_and_bolded": True,
+        "true_false_groups_restored_to_abcd_order": True,
+        "true_false_items_shuffled": False,
         "word_fields_update_on_open": True,
         "option_shuffle_warnings": option_shuffle_warnings,
         "page_number_added": True,
