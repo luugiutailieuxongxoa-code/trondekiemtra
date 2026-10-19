@@ -24,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -90,7 +90,7 @@ def public_config() -> dict[str, Any]:
         "features": {"docx_import": True, "pdf_import": False, "ocr": False,
                      "mix_api": True, "excel_export_basic": True,
                      "docx_export_source_preserving": True, "docx_section_aware_parse": True, "docx_source_mix_ui": True,
-                     "docx_official_header": True, "docx_answer_mark_cleanup": True, "docx_official_footer": True, "docx_page_numbers": True, "short_answer_inline_key_cleanup": True, "pdf_export": False,
+                     "docx_official_header": True, "docx_answer_mark_cleanup": True, "docx_official_footer": True, "docx_page_numbers": True, "short_answer_inline_key_cleanup": True, "section_g_modes": True, "option_paragraph_shuffle": True, "editable_docx_header": True, "pdf_export": False,
                      "database": False, "authentication": False},
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
@@ -169,6 +169,8 @@ async def export_docx(
     file: UploadFile = File(...),
     question_order: str | None = None,
     header: str | None = None,
+    section_modes: str | None = None,
+    seed: int | None = None,
 ) -> FileResponse:
     """Export a DOCX using the source document, standard exam header and answer-mark cleanup.
 
@@ -196,8 +198,16 @@ async def export_docx(
                 raise HTTPException(status_code=422, detail="header phải là JSON hợp lệ.") from exc
             if not isinstance(header_config, dict):
                 raise HTTPException(status_code=422, detail="header phải là một đối tượng JSON.")
+        section_mode_config = None
+        if section_modes:
+            try:
+                section_mode_config = json.loads(section_modes)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail="section_modes phải là JSON hợp lệ.") from exc
+            if not isinstance(section_mode_config, dict):
+                raise HTTPException(status_code=422, detail="section_modes phải là một đối tượng JSON.")
         try:
-            exported, report = export_reordered_docx(data, order, header_config)
+            exported, report = export_reordered_docx(data, order, header_config, section_mode_config, seed)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         temp = tempfile.NamedTemporaryFile(prefix="ymp-exam-", suffix=".docx", delete=False)
@@ -220,6 +230,7 @@ async def export_docx(
                 "X-YMP-Page-Number-Added": str(report["page_number_added"]).lower(),
                 "X-YMP-Short-Answer-Keys-Removed": str(report["short_answer_inline_keys_removed"] > 0).lower(),
                 "X-YMP-Section-Order-Preserved": "true",
+                "X-YMP-Option-Paragraphs-Shuffled": str(report.get("option_paragraphs_shuffled", 0)),
                 "X-YMP-Warning-Count": str(len(report["warnings"])),
             },
             background=BackgroundTask(Path(temp_path).unlink, missing_ok=True),

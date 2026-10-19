@@ -36,6 +36,8 @@ def _section_type(section: str) -> str:
         return "true_false"
     if section == "PIII":
         return "short_answer"
+    if section == "PIV":
+        return "essay"
     return "multiple_choice"
 
 
@@ -51,6 +53,9 @@ def parse_docx(content: bytes):
     section_titles: dict[str, str] = {}
     section_counts: dict[str, int] = {}
     current = None
+    active_group = "g0"
+    pending_group = None
+    section_groups: dict[str, str] = {}
     all_text = []
     table_count = 0
 
@@ -80,12 +85,30 @@ def parse_docx(content: bytes):
         has_image = _has_drawing(block)
         if text:
             all_text.append(text)
+        marker_matches = re.findall(r"<\s*(g[0-3])\s*>", text, re.I) if text else []
+        if marker_matches:
+            pending_group = marker_matches[-1].lower()
+            # Markers start a new group. If a question is in progress, close it before
+            # applying the new mode so the following questions inherit the marker.
+            if not SECTION_RE.match(text):
+                flush()
+                active_group = pending_group
+                if section != "P0":
+                    section_groups.setdefault(section, active_group)
+                continue
         sec = SECTION_RE.match(text) if text else None
         if sec:
             flush()
             roman = sec.group(1).upper()
             section = f"P{roman}"
-            section_titles[section] = text
+            section_titles[section] = G_MARKER_RE.sub("", text).strip() if 'G_MARKER_RE' in globals() else re.sub(r"<\s*g[0-3]\s*>", "", text, flags=re.I).strip()
+            inline_group = marker_matches[-1].lower() if marker_matches else None
+            if inline_group:
+                active_group = inline_group
+            elif pending_group:
+                active_group = pending_group
+            section_groups.setdefault(section, active_group)
+            pending_group = None
             continue
 
         q = QRE.match(text) if text else None
@@ -108,7 +131,7 @@ def parse_docx(content: bytes):
                 "options": [],
                 "answer": None,
                 "points": 0,
-                "group": "g0",
+                "group": active_group,
                 "has_image": has_image,
                 "has_table": False,
                 "review_required": True,
@@ -146,6 +169,7 @@ def parse_docx(content: bytes):
             "question_count": len(qs),
             "question_numbers": [q["source_number"] for q in qs],
             "type": qs[0]["type"],
+            "group": section_groups.get(sec, qs[0].get("group", "g0")),
             "image_count": sum(1 for q in qs if q["has_image"]),
             "table_count": sum(1 for q in qs if q["has_table"]),
         })

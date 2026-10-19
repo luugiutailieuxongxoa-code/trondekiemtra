@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from io import BytesIO
 from typing import Sequence
+import random
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
@@ -101,12 +102,22 @@ def _set_run_font(run, name="Times New Roman", size=12, bold=None):
         run.bold = bold
 
 
-def _add_official_footer(section) -> None:
-    """Add an editable official-exam footer and Word PAGE field."""
+def _append_word_field(paragraph, instruction: str, displayed: str = "1") -> None:
+    """Append a Word field (PAGE/NUMPAGES) that updates when Word repaginates."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    run = paragraph.add_run()
+    _set_run_font(run, size=9)
+    for tag, attrs in (("begin", {}),):
+        node = OxmlElement("w:fldChar"); node.set(qn("w:fldCharType"), tag); run._r.append(node)
+    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve"); instr.text = f" {instruction} "; run._r.append(instr)
+    separate = OxmlElement("w:fldChar"); separate.set(qn("w:fldCharType"), "separate"); run._r.append(separate)
+    display = OxmlElement("w:t"); display.text = displayed; run._r.append(display)
+    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end"); run._r.append(end)
 
+
+def _add_official_footer(section, exam_code: str = "001") -> None:
+    """Footer contains only the exam code and current page number, never official-title text."""
     footer = section.footer
     footer.is_linked_to_previous = False
     p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
@@ -114,17 +125,8 @@ def _add_official_footer(section) -> None:
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(4)
     p.paragraph_format.space_after = Pt(0)
-
-    left = p.add_run("ĐỀ THI CHÍNH THỨC  •  Trang ")
-    _set_run_font(left, size=9)
-    field_run = p.add_run()
-    _set_run_font(field_run, size=9)
-    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve"); instr.text = " PAGE "
-    separate = OxmlElement("w:fldChar"); separate.set(qn("w:fldCharType"), "separate")
-    display = OxmlElement("w:t"); display.text = "1"
-    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
-    field_run._r.append(begin); field_run._r.append(instr); field_run._r.append(separate); field_run._r.append(display); field_run._r.append(end)
+    r = p.add_run(f"Mã đề: {exam_code}  •  Trang "); _set_run_font(r, size=9)
+    _append_word_field(p, "PAGE", "1")
 
 
 def _remove_short_answer_inline_keys(children: list) -> tuple[list, int]:
@@ -169,7 +171,7 @@ def _add_official_header(doc, header: dict | None = None) -> None:
     section.bottom_margin = Cm(2)
     section.right_margin = Cm(2)
     section.left_margin = Cm(2.5)
-    _add_official_footer(section)
+    _add_official_footer(section, exam_code)
 
     table = doc.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -191,6 +193,22 @@ def _add_official_header(doc, header: dict | None = None) -> None:
         if idx:
             p = left.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(value.upper()); _set_run_font(r, size=11, bold=True)
+    # Separator line under the agency/school identity, followed by live total-page field
+    # and the official designation, all in the left header column as requested.
+    school_p = left.paragraphs[-1]
+    ppr = school_p._p.get_or_add_pPr()
+    from docx.oxml import OxmlElement
+    p_bdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single"); bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "3"); bottom.set(qn("w:color"), "000000")
+    p_bdr.append(bottom); ppr.append(p_bdr)
+    p = left.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run("Đề thi gồm "); _set_run_font(r, size=10)
+    _append_word_field(p, "NUMPAGES", "1")
+    r = p.add_run(" trang"); _set_run_font(r, size=10)
+    p = left.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run("ĐỀ THI CHÍNH THỨC"); _set_run_font(r, size=11, bold=True)
     right.text = ""
     p = right.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run(exam_title.upper()); _set_run_font(r, size=12, bold=True)
@@ -230,7 +248,53 @@ def _clean_answer_key_tail(children: list) -> tuple[list, bool]:
     return children, False
 
 
-def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None, header: dict | None = None) -> tuple[bytes, dict]:
+
+def _shuffle_options_in_block(block: list, rng: random.Random) -> tuple[int, str | None]:
+    """Shuffle option paragraphs when they are separate, clearly labeled A-D paragraphs.
+
+    Inline side-by-side options are left untouched rather than risking corruption.
+    """
+    option_positions = [i for i, el in enumerate(block) if el.tag == qn("w:p") and OPTION_RE.match(_paragraph_text(el))]
+    if len(option_positions) < 2:
+        return 0, None
+    # Only shuffle a contiguous run; non-option paragraphs can contain figures or formulas.
+    groups: list[list[int]] = []
+    for pos in option_positions:
+        if not groups or pos != groups[-1][-1] + 1:
+            groups.append([pos])
+        else:
+            groups[-1].append(pos)
+    changed = 0
+    for group in groups:
+        if len(group) < 2:
+            continue
+        original = [block[i] for i in group]
+        shuffled = original[:]
+        rng.shuffle(shuffled)
+        for offset, pos in enumerate(group):
+            block[pos] = shuffled[offset]
+            _relabel_option(block[pos], chr(65 + offset))
+        changed += len(group)
+    return changed, None
+
+
+def _relabel_option(element, label: str) -> None:
+    """Relabel the leading A./B./C./D. marker without rebuilding its paragraph XML."""
+    first = True
+    for node in element.iter(qn("w:t")):
+        value = node.text or ""
+        if not value:
+            continue
+        if first:
+            match = OPTION_RE.match(value)
+            if match:
+                node.text = re.sub(r"^\s*[A-D][.)]", f"{label}.", value, count=1)
+                if node.text.startswith(" ") or node.text.endswith(" "):
+                    node.set(qn("xml:space"), "preserve")
+            first = False
+            return
+
+def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None, header: dict | None = None, section_modes: dict | None = None, seed: int | None = None) -> tuple[bytes, dict]:
     try:
         doc = Document(BytesIO(source))
     except Exception as exc:
@@ -239,6 +303,33 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     body = doc.element.body
     children = [child for child in list(body) if child.tag != qn("w:sectPr")]
     sect_pr = next((child for child in list(body) if child.tag == qn("w:sectPr")), None)
+    # Resolve each section's default g0-g3 mode from source markers before cleaning them.
+    marker_modes: dict[str, str] = {}
+    current_section = "P0"
+    active_mode = "g0"
+    pending_mode: str | None = None
+    for child in children:
+        text = _paragraph_text(child)
+        marker_match = re.search(r"<\s*(g[0-3])\s*>", text, re.I)
+        sec_match = SECTION_RE.match(text)
+        if marker_match:
+            pending_mode = marker_match.group(1).lower()
+            if not sec_match:
+                active_mode = pending_mode
+                continue
+        if sec_match:
+            current_section = f"P{sec_match.group(1).upper()}"
+            active_mode = marker_match.group(1).lower() if marker_match else (pending_mode or active_mode)
+            marker_modes[current_section] = active_mode
+            pending_mode = None
+    effective_modes = dict(marker_modes)
+    if section_modes:
+        for key, value in section_modes.items():
+            if str(value) in {"g0", "g1", "g2", "g3"}:
+                effective_modes[str(key)] = str(value)
+    rng = random.Random(seed)
+    option_shuffle_count = 0
+    option_shuffle_warnings: list[str] = []
     # Remove standalone parser markers and the explicit trailing answer-key section.
     for child in children:
         _clean_marker_text(child)
@@ -406,6 +497,12 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                 if chosen:
                     for new_number, qid in enumerate(chosen, start=1):
                         block = blocks[qid]
+                        q_section = next((it["section"] for it in question_starts if it["id"] == qid), sec)
+                        if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
+                            count, warning = _shuffle_options_in_block(block, rng)
+                            option_shuffle_count += count
+                            if warning:
+                                option_shuffle_warnings.append(warning)
                         if block and _replace_heading_number(block[0], new_number):
                             renumbered += 1
                         else:
@@ -448,6 +545,12 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "parser_markers_removed": True,
         "official_header_added": True,
         "official_footer_added": True,
+        "footer_contains_only_code_and_page": True,
+        "total_pages_field_in_header": True,
+        "official_title_in_header": True,
+        "section_modes": effective_modes,
+        "option_paragraphs_shuffled": option_shuffle_count,
+        "option_shuffle_warnings": option_shuffle_warnings,
         "page_number_added": True,
         "short_answer_inline_keys_removed": short_answer_keys_removed,
         "section_order_preserved": True,
