@@ -249,6 +249,175 @@ def _clean_answer_key_tail(children: list) -> tuple[list, bool]:
 
 
 
+OPTION_MARKER_IN_TEXT_RE = re.compile(r"(^|[\t ]+)([A-D])[.)](?=\s|$)")
+TF_MARKER_IN_TEXT_RE = re.compile(r"(^|[\t ]+)([a-d])[.)](?=\s|$)")
+
+
+def _set_run_bold(run_element, value: bool = True) -> None:
+    """Set bold on a WordprocessingML run while preserving other run properties."""
+    rpr = run_element.find(qn("w:rPr"))
+    if rpr is None:
+        from docx.oxml import OxmlElement
+        rpr = OxmlElement("w:rPr")
+        run_element.insert(0, rpr)
+    bold = rpr.find(qn("w:b"))
+    if value:
+        if bold is None:
+            from docx.oxml import OxmlElement
+            bold = OxmlElement("w:b")
+            rpr.append(bold)
+        bold.set(qn("w:val"), "true")
+    elif bold is not None:
+        rpr.remove(bold)
+
+
+def _paragraph_text_nodes(paragraph):
+    """Return flattened paragraph text and character spans for text nodes/tabs."""
+    chunks = []
+    spans = []
+    offset = 0
+    for node in paragraph.iter():
+        if node.tag == qn("w:t"):
+            value = node.text or ""
+            chunks.append(value)
+            spans.append((offset, offset + len(value), node))
+            offset += len(value)
+        elif node.tag == qn("w:tab"):
+            chunks.append("\t")
+            spans.append((offset, offset + 1, node))
+            offset += 1
+    return "".join(chunks), spans
+
+
+def _bold_label_at_offset(spans, char_offset, replacement: str | None = None) -> bool:
+    for start, end, node in spans:
+        if start <= char_offset < end and node.tag == qn("w:t"):
+            value = node.text or ""
+            local = char_offset - start
+            if replacement is not None:
+                node.text = value[:local] + replacement + value[local + 1:]
+                if node.text.startswith(" ") or node.text.endswith(" "):
+                    node.set(qn("xml:space"), "preserve")
+            run = node.getparent()
+            if run is not None and run.tag == qn("w:r"):
+                _set_run_bold(run, True)
+            return True
+    return False
+
+
+def _normalize_and_bold_option_labels(block: list) -> tuple[int, int]:
+    """Normalize option labels A-D in reading order and bold A-D/a-d labels.
+
+    Works even when Word splits labels, punctuation, equations, tabs or drawings across
+    multiple runs. Option labels are normalized only in paragraphs that begin with A-D.
+    """
+    option_index = 0
+    changed = 0
+    bolded = 0
+    for element in block:
+        paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
+        for paragraph in paragraphs:
+            text, spans = _paragraph_text_nodes(paragraph)
+            if not re.match(r"^\s*[A-D][.)]", text):
+                continue
+            for match in OPTION_MARKER_IN_TEXT_RE.finditer(text):
+                letter_offset = match.start(2)
+                normalized = chr(65 + (option_index % 4))
+                if normalized != match.group(2):
+                    changed += int(_bold_label_at_offset(spans, letter_offset, normalized))
+                else:
+                    _bold_label_at_offset(spans, letter_offset)
+                option_index += 1
+                bolded += 1
+    # True/false subitems a), b), c), d) are bolded but their labels are not renumbered.
+    for element in block:
+        paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
+        for paragraph in paragraphs:
+            text, spans = _paragraph_text_nodes(paragraph)
+            if not re.match(r"^\s*[a-d][.)]", text, re.I):
+                continue
+            for match in TF_MARKER_IN_TEXT_RE.finditer(text):
+                if _bold_label_at_offset(spans, match.start(2)):
+                    bolded += 1
+    return changed, bolded
+
+
+def _split_and_style_label_runs(block: list) -> None:
+    """Split simple text runs so only visible option/subitem markers are bold."""
+    from copy import deepcopy
+    from docx.oxml import OxmlElement
+    label_re = re.compile(r"(^|[\t ]+)([A-Da-d])[.)](?=\s|$)")
+    for element in block:
+        paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
+        for paragraph in paragraphs:
+            paragraph_text = _paragraph_text(paragraph)
+            if not re.match(r"^\s*(?:[A-D][.)]|[a-d][.)])", paragraph_text):
+                continue
+            for run in list(paragraph.iter(qn("w:r"))):
+                children = list(run)
+                if any(child.tag != qn("w:rPr") and child.tag != qn("w:t") for child in children):
+                    continue
+                text_nodes = [child for child in children if child.tag == qn("w:t")]
+                if len(text_nodes) != 1:
+                    continue
+                text_node = text_nodes[0]
+                value = text_node.text or ""
+                matches = list(label_re.finditer(value))
+                if not matches:
+                    continue
+                pieces = []
+                cursor = 0
+                for match in matches:
+                    marker_start = match.start(2)
+                    marker_end = match.end(0)
+                    if marker_start > cursor:
+                        pieces.append((value[cursor:marker_start], False))
+                    # Keep punctuation and any trailing whitespace with the bold label.
+                    pieces.append((value[marker_start:marker_end], True))
+                    cursor = marker_end
+                if cursor < len(value):
+                    pieces.append((value[cursor:], False))
+                parent = run.getparent()
+                if parent is None:
+                    continue
+                insert_at = parent.index(run)
+                for piece, is_label in pieces:
+                    if not piece:
+                        continue
+                    new_run = OxmlElement("w:r")
+                    rpr = run.find(qn("w:rPr"))
+                    if rpr is not None:
+                        new_rpr = deepcopy(rpr)
+                        old_bold = new_rpr.find(qn("w:b"))
+                        if old_bold is not None:
+                            new_rpr.remove(old_bold)
+                        old_bold_cs = new_rpr.find(qn("w:bCs"))
+                        if old_bold_cs is not None:
+                            new_rpr.remove(old_bold_cs)
+                        new_run.append(new_rpr)
+                    if is_label:
+                        _set_run_bold(new_run, True)
+                    t = OxmlElement("w:t")
+                    if piece.startswith(" ") or piece.endswith(" ") or "\t" in piece:
+                        t.set(qn("xml:space"), "preserve")
+                    t.text = piece
+                    new_run.append(t)
+                    parent.insert(insert_at, new_run)
+                    insert_at += 1
+                parent.remove(run)
+
+
+def _enable_field_updates(doc) -> None:
+    """Ask Word-compatible editors to refresh PAGE/NUMPAGES fields on open."""
+    from docx.oxml import OxmlElement
+    settings = doc.settings._element
+    update = settings.find(qn("w:updateFields"))
+    if update is None:
+        update = OxmlElement("w:updateFields")
+        settings.append(update)
+    update.set(qn("w:val"), "true")
+
+
 def _shuffle_options_in_block(block: list, rng: random.Random) -> tuple[int, str | None]:
     """Shuffle option paragraphs when they are separate, clearly labeled A-D paragraphs.
 
@@ -498,6 +667,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                     for new_number, qid in enumerate(chosen, start=1):
                         block = blocks[qid]
                         q_section = next((it["section"] for it in question_starts if it["id"] == qid), sec)
+                        normalized_options, bolded_labels = _normalize_and_bold_option_labels(block)
+                        _split_and_style_label_runs(block)
                         if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
                             count, warning = _shuffle_options_in_block(block, rng)
                             option_shuffle_count += count
@@ -533,6 +704,7 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
 
     # Rebuild body using cleaned elements, then prepend the official exam template.
     _add_official_header(doc, header)
+    _enable_field_updates(doc)
     out = BytesIO()
     doc.save(out)
     return out.getvalue(), {
@@ -550,6 +722,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "official_title_in_header": True,
         "section_modes": effective_modes,
         "option_paragraphs_shuffled": option_shuffle_count,
+        "option_labels_normalized_and_bolded": True,
+        "word_fields_update_on_open": True,
         "option_shuffle_warnings": option_shuffle_warnings,
         "page_number_added": True,
         "short_answer_inline_keys_removed": short_answer_keys_removed,
