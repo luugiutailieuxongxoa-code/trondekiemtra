@@ -24,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -89,7 +89,8 @@ def public_config() -> dict[str, Any]:
         "version": VERSION,
         "features": {"docx_import": True, "pdf_import": False, "ocr": False,
                      "mix_api": True, "excel_export_basic": True,
-                     "docx_export_source_preserving": True, "docx_section_aware_parse": True, "docx_source_mix_ui": True, "pdf_export": False,
+                     "docx_export_source_preserving": True, "docx_section_aware_parse": True, "docx_source_mix_ui": True,
+                     "docx_official_header": True, "docx_answer_mark_cleanup": True, "pdf_export": False,
                      "database": False, "authentication": False},
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
@@ -167,8 +168,9 @@ def mix(request: MixRequest) -> dict[str, Any]:
 async def export_docx(
     file: UploadFile = File(...),
     question_order: str | None = None,
+    header: str | None = None,
 ) -> FileResponse:
-    """Export a DOCX by reordering source question blocks without rebuilding them.
+    """Export a DOCX using the source document, standard exam header and answer-mark cleanup.
 
     `question_order` is an optional JSON array, e.g. ["Q-DOCX-2", "Q-DOCX-1"].
     The order may contain a subset of detected question IDs; omitted question blocks
@@ -186,8 +188,16 @@ async def export_docx(
             if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
                 raise HTTPException(status_code=422, detail="question_order phải là danh sách ID câu dạng chuỗi.")
             order = parsed
+        header_config = None
+        if header:
+            try:
+                header_config = json.loads(header)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail="header phải là JSON hợp lệ.") from exc
+            if not isinstance(header_config, dict):
+                raise HTTPException(status_code=422, detail="header phải là một đối tượng JSON.")
         try:
-            exported, report = export_reordered_docx(data, order)
+            exported, report = export_reordered_docx(data, order, header_config)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         temp = tempfile.NamedTemporaryFile(prefix="ymp-exam-", suffix=".docx", delete=False)
@@ -202,7 +212,10 @@ async def export_docx(
             headers={
                 "X-YMP-Question-Count": str(report["question_count"]),
                 "X-YMP-Renumbered-Count": str(report["renumbered_count"]),
-                "X-YMP-Answer-Markings-Removed": "false",
+                "X-YMP-Answer-Markings-Removed": str(report["answer_markings_removed"]).lower(),
+                "X-YMP-Answer-Key-Section-Removed": str(report["answer_key_section_removed"]).lower(),
+                "X-YMP-Parser-Markers-Removed": str(report["parser_markers_removed"]).lower(),
+                "X-YMP-Official-Header-Added": str(report["official_header_added"]).lower(),
                 "X-YMP-Section-Order-Preserved": "true",
                 "X-YMP-Warning-Count": str(len(report["warnings"])),
             },
