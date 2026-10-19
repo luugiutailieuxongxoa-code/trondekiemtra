@@ -147,3 +147,21 @@ Trước khi sử dụng đề thi chính thức, hãy mở DOCX xuất bằng M
 - Kiểm thử backend: `13 passed`.
 
 Lưu ý: quy tắc loại `A. ...` dựa vào tiêu đề phần có cụm “trả lời ngắn” và dòng đáp án đứng riêng. Cần kiểm tra đề thực tế nếu mẫu dùng tiêu đề khác hoặc đáp án được gõ cùng đoạn với nội dung câu hỏi.
+
+
+## Giai đoạn 8 — quy tắc g0/g1/g2/g3 theo từng phần
+
+- Bộ phân tích nhận marker `<g0>`, `<g1>`, `<g2>`, `<g3>` trước tiêu đề phần hoặc trong đoạn marker riêng. Marker được dùng làm chế độ mặc định cho phần kế tiếp. Phần IV được phân loại là tự luận.
+- Giao diện Trộn đề hiển thị lựa chọn riêng cho từng phần đã nhận diện: g0 giữ nguyên, g1 đảo câu, g2 đảo phương án, g3 đảo cả câu và phương án. Giáo viên có thể ghi đè chế độ mặc định trước khi tạo mã đề.
+- Giao diện có trường chỉnh sửa thông tin tiêu đề DOCX (Sở, trường, tên kỳ thi, môn, khối/lớp, năm học, thời gian).
+- Khi xuất DOCX, backend đảo câu trong phạm vi từng phần và đảo các đoạn phương án A./B./C./D. nhận diện được; nhãn phương án được đánh lại A-D. Nội dung hình ảnh, công thức, bảng và đối tượng nhúng vẫn lấy từ DOCX nguồn.
+- **Giới hạn:** chế độ g2/g3 hiện chỉ đảo được phương án nằm trong các đoạn Word riêng biệt có nhãn A./B./C./D. Các phương án nằm chung một đoạn, trong hộp văn bản, hoặc được dàn bằng bảng/cột cần xử lý riêng. Việc trộn phương án hiện chưa xuất bảng đáp án đã ánh xạ lại; giáo viên bắt buộc rà soát đáp án trước khi phát hành.
+- Kiểm thử backend: `pytest -q` (15 bài). Frontend build chưa được xác nhận vì `npm install` hết thời gian trong môi trường đóng gói.
+
+
+## Phase 9 — DOCX output fixes (2026-10-19)
+
+- Normalize duplicate A/B/C/D labels in each question block in reading order, including two-column/tab-separated option lines.
+- Bold only the visible A./B./C./D. and a)/b)/c)/d) markers where the labels are separate Word text runs; preserve formula/image/object XML.
+- Set Word's `updateFields` setting so PAGE and NUMPAGES fields are refreshed when the document is opened in a Word-compatible editor. The final page count still depends on the editor's pagination engine.
+- Backend tests: 16 passed.
