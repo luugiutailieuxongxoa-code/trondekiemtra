@@ -126,7 +126,7 @@ export default function App() {
   const [headerConfig, setHeaderConfig] = useState({
     department: "SỞ GD&ĐT ĐỒNG NAI", school: "THPT THỐNG NHẤT B",
     exam_title: "ĐỀ KIỂM TRA", grade: "12", school_year: "2026-2027",
-    subject: "HÓA HỌC", duration: "45 phút"
+    subject: "", duration: ""
   });
   const [isImporting, setIsImporting] = useState(false);
   const [isExportingSource, setIsExportingSource] = useState(false);
@@ -340,7 +340,7 @@ export default function App() {
               <summary><b>Cài đặt tiêu đề xuất DOCX</b></summary>
               <label className="field">Tên kỳ kiểm tra<input value={headerConfig.exam_title} onChange={e => setHeaderConfig(prev => ({...prev, exam_title:e.target.value}))}/></label>
               <div className="fieldrow"><label className="field">Sở GD&ĐT<input value={headerConfig.department} onChange={e => setHeaderConfig(prev => ({...prev, department:e.target.value}))}/></label><label className="field">Trường<input value={headerConfig.school} onChange={e => setHeaderConfig(prev => ({...prev, school:e.target.value}))}/></label></div>
-              <div className="fieldrow"><label className="field">Môn thi<input value={headerConfig.subject} onChange={e => setHeaderConfig(prev => ({...prev, subject:e.target.value}))}/></label><label className="field">Thời gian<input value={headerConfig.duration} onChange={e => setHeaderConfig(prev => ({...prev, duration:e.target.value}))}/></label></div>
+              <div className="fieldrow"><label className="field">Môn thi<input placeholder="Nhập đúng môn của đề gốc" value={headerConfig.subject} onChange={e => setHeaderConfig(prev => ({...prev, subject:e.target.value}))}/></label><label className="field">Thời gian<input placeholder="Ví dụ: 90 phút" value={headerConfig.duration} onChange={e => setHeaderConfig(prev => ({...prev, duration:e.target.value}))}/></label></div>
               <div className="fieldrow"><label className="field">Khối/lớp<input value={headerConfig.grade} onChange={e => setHeaderConfig(prev => ({...prev, grade:e.target.value}))}/></label><label className="field">Năm học<input value={headerConfig.school_year} onChange={e => setHeaderConfig(prev => ({...prev, school_year:e.target.value}))}/></label></div>
             </details>
             {sourceDocx && parsedDocx?.section_summary?.length ? <div className="section-mode-settings"><b>Quy tắc theo từng phần (ưu tiên marker g0–g3 trong đề gốc)</b><p>g0 giữ nguyên · g1 đảo câu · g2 đảo phương án · g3 đảo cả câu và phương án. Có thể đổi từng phần trước khi tạo mã đề.</p>{parsedDocx.section_summary.map(section => <label className="field" key={section.id}>{section.title || section.id}<select value={sectionModes[section.id] ?? section.group ?? "g0"} onChange={e => setSectionModes(prev => ({...prev,[section.id]:e.target.value as MixMode}))}><option value="g0">g0 — Giữ nguyên</option><option value="g1">g1 — Đảo câu</option><option value="g2">g2 — Đảo phương án</option><option value="g3">g3 — Đảo câu và phương án</option></select></label>)}</div> : <><label className="field">Quy tắc trộn</label><div className="modes">{[
