@@ -132,3 +132,48 @@ def test_export_docx_rejects_unknown_question_order():
         files={"file": ("sample.docx", make_two_question_docx(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
     )
     assert response.status_code == 422
+
+
+def test_parser_returns_section_summary_for_immediate_mix_workflow():
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều lựa chọn")
+    doc.add_paragraph("Câu 1. Nước có công thức là gì?")
+    doc.add_paragraph("A. H2O")
+    doc.add_paragraph("B. CO2")
+    doc.add_paragraph("PHẦN II. Trắc nghiệm đúng sai")
+    doc.add_paragraph("Câu 1. Xét các phát biểu sau")
+    doc.add_paragraph("a) Nước là H2O")
+    buffer = BytesIO()
+    doc.save(buffer)
+    response = client.post(
+        "/api/exams/parse",
+        files={"file": ("parts.docx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["question_count"] == 2
+    assert [part["id"] for part in body["section_summary"]] == ["PI", "PII"]
+    assert [part["question_count"] for part in body["section_summary"]] == [1, 1]
+    assert body["questions"][1]["type"] == "true_false"
+
+
+def test_parser_counts_inline_image_in_source_docx():
+    import base64
+    # Minimal 1x1 transparent PNG; avoid adding an image dependency to the backend.
+    image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1sAAAAASUVORK5CYII=")
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Trắc nghiệm")
+    doc.add_paragraph("Câu 1. Quan sát hình sau:")
+    doc.add_picture(BytesIO(image_bytes))
+    doc.add_paragraph("A. Đúng")
+    doc.add_paragraph("B. Sai")
+    buffer = BytesIO()
+    doc.save(buffer)
+    response = client.post(
+        "/api/exams/parse",
+        files={"file": ("image.docx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["image_count"] == 1
+    assert body["questions"][0]["has_image"] is True
