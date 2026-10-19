@@ -29,7 +29,7 @@ END_RE = re.compile(r"\s*(?:[-—– ]*HẾT[-—– ]*|[-—– ]*KẾT THÚC[-
 G_MARKER_RE = re.compile(r"<\s*g\s*\d+\s*>", re.I)
 ANSWER_MARKER_RE = re.compile(r"\bĐA\s*:\s*[^\s;,.]+", re.I)
 ANSWER_KEY_RE = re.compile(r"^\s*(?:ĐÁP ÁN|ĐÁP ÁN THAM KHẢO|ĐÁP ÁN ĐỀ|ANSWER KEY)\b", re.I)
-OPTION_RE = re.compile(r"^\s*[A-D][.)]\s*")
+OPTION_RE = re.compile(r"^\s*([A-D])[.)]\s*")
 SHORT_ANSWER_HEADING_RE = re.compile(r"trả\s*lời\s*ngắn", re.I)
 SHORT_ANSWER_LEAK_RE = re.compile(r"^\s*A\.\s*\S.*$", re.I)
 
@@ -399,59 +399,35 @@ def _restore_true_false_subitem_order(block: list) -> tuple[int, list[str]]:
     return changed, warnings
 
 def _normalize_and_bold_option_labels(block: list) -> tuple[int, int, list[str]]:
-    """Normalize only a complete four-option set; never wrap labels modulo four.
+    """Bold existing option labels without rewriting their identities.
 
-    Word tables and inline two-column layouts are traversed in document/XML order. If
-    exactly four explicit A-D markers are found in the question block, their labels are
-    normalized to A, B, C, D in that order while keeping each text run and its content
-    in place. If the marker count is incomplete/ambiguous, labels are only bolded and a
-    warning is returned instead of silently creating duplicate or misleading labels.
-    Lowercase a)-d) markers are processed separately and never count as A-D options.
+    The source DOCX is authoritative: labels can be split across Word runs, arranged
+    side-by-side, or accompanied by OMML/drawings. Reassigning labels based on flattened
+    XML order corrupts otherwise-correct source options (e.g. A,D,A,B). Therefore this
+    function NEVER renumbers labels. Actual option shuffling is handled separately and
+    only for a complete, clearly separated A-D paragraph group by
+    _shuffle_options_in_block().
     """
-    changed = 0
     bolded = 0
     warnings: list[str] = []
-    option_markers = []
-    paragraphs_seen = set()
+    seen = set()
     for element in block:
         paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
         for paragraph in paragraphs:
-            if id(paragraph) in paragraphs_seen:
+            marker_id = id(paragraph)
+            if marker_id in seen:
                 continue
-            paragraphs_seen.add(id(paragraph))
+            seen.add(marker_id)
             text, spans = _paragraph_text_nodes(paragraph)
-            # A paragraph must begin with an uppercase option label. Additional labels
-            # in the same paragraph are allowed for side-by-side A/B and C/D layouts.
-            if not re.match(r"^\s*[A-D][.)]", text):
-                continue
-            for match in OPTION_MARKER_IN_TEXT_RE.finditer(text):
-                option_markers.append((paragraph, spans, match.start(2), match.group(2)))
-
-    can_normalize = len(option_markers) == 4
-    if option_markers and not can_normalize:
-        warnings.append(
-            f"Không tự chuẩn hóa nhãn A-D: phát hiện {len(option_markers)} nhãn trong một khối câu; cần kiểm tra cấu trúc phương án."
-        )
-    for index, (paragraph, spans, offset, original_label) in enumerate(option_markers):
-        replacement = chr(65 + index) if can_normalize else None
-        if _bold_label_at_offset(spans, offset, replacement):
-            bolded += 1
-            if replacement is not None and replacement != original_label:
-                changed += 1
-
-    # Bold true/false subitems but never relabel or shuffle them as A-D options.
-    for element in block:
-        paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
-        for paragraph in paragraphs:
-            if id(paragraph) in paragraphs_seen and paragraph.tag != qn("w:p"):
-                continue
-            text, spans = _paragraph_text_nodes(paragraph)
-            if not re.match(r"^\s*[a-d][.)]", text):
-                continue
-            for match in TF_MARKER_IN_TEXT_RE.finditer(text):
-                if _bold_label_at_offset(spans, match.start(2)):
-                    bolded += 1
-    return changed, bolded, warnings
+            if re.match(r"^\s*[A-D][.)]", text):
+                for match in OPTION_MARKER_IN_TEXT_RE.finditer(text):
+                    if _bold_label_at_offset(spans, match.start(2)):
+                        bolded += 1
+            if re.match(r"^\s*[a-d][.)]", text):
+                for match in TF_MARKER_IN_TEXT_RE.finditer(text):
+                    if _bold_label_at_offset(spans, match.start(2)):
+                        bolded += 1
+    return 0, bolded, warnings
 
 
 def _split_and_style_label_runs(block: list) -> None:
@@ -530,50 +506,100 @@ def _enable_field_updates(doc) -> None:
     update.set(qn("w:val"), "true")
 
 
-def _shuffle_options_in_block(block: list, rng: random.Random) -> tuple[int, str | None]:
-    """Shuffle option paragraphs when they are separate, clearly labeled A-D paragraphs.
+def _shuffle_options_in_block(block: list, rng: random.Random) -> tuple[int, str | None, dict[str, str]]:
+    """Shuffle complete A-D option paragraph groups while keeping label slots fixed.
 
-    Inline side-by-side options are left untouched rather than risking corruption.
+    A paragraph is treated as one indivisible option payload (so OMML, drawings,
+    runs, hyperlinks and paragraph formatting travel together). We only shuffle a
+    contiguous group of exactly four paragraphs with unique A/B/C/D labels. We do
+    not try to repair duplicate/missing labels by guessing, and inline/table options
+    are intentionally left untouched unless represented as four top-level paragraphs.
+
+    Returns (number_of_option_paragraphs_moved, warning, old_label_to_new_label).
     """
-    option_positions = [i for i, el in enumerate(block) if el.tag == qn("w:p") and OPTION_RE.match(_paragraph_text(el))]
-    if len(option_positions) < 2:
-        return 0, None
-    # Only shuffle a contiguous run; non-option paragraphs can contain figures or formulas.
+    option_positions = [
+        i for i, el in enumerate(block)
+        if el.tag == qn("w:p") and OPTION_RE.match(_paragraph_text(el))
+    ]
+    inline_option_paragraphs = []
+    for el in block:
+        if el.tag != qn("w:p"):
+            continue
+        text = _paragraph_text(el)
+        markers = list(OPTION_MARKER_IN_TEXT_RE.finditer(text))
+        if len(markers) > 1:
+            inline_option_paragraphs.append(text[:100])
+    if inline_option_paragraphs:
+        return 0, ("Bỏ qua đảo phương án: có nhiều nhãn A-D nằm chung một đoạn/tab hoặc bố cục nội tuyến; "
+                   "cần bộ tách phương án theo cấu trúc Word trước khi trộn."), {}
+    if not option_positions:
+        return 0, None, {}
+
     groups: list[list[int]] = []
     for pos in option_positions:
         if not groups or pos != groups[-1][-1] + 1:
             groups.append([pos])
         else:
             groups[-1].append(pos)
+
     changed = 0
+    mappings: dict[str, str] = {}
+    warnings: list[str] = []
     for group in groups:
-        if len(group) < 2:
-            continue
         original = [block[i] for i in group]
+        labels = [OPTION_RE.match(_paragraph_text(el)).group(1).upper() for el in original]
+        # Do not guess how to repair malformed or partial groups.
+        if len(group) != 4 or set(labels) != set("ABCD"):
+            warnings.append(
+                "Bỏ qua đảo phương án: cần đúng 4 đoạn phương án riêng biệt có nhãn A, B, C, D; "
+                f"nhóm hiện tại có nhãn {','.join(labels) or '(không rõ)'} ."
+            )
+            continue
+
         shuffled = original[:]
         rng.shuffle(shuffled)
-        for offset, pos in enumerate(group):
-            block[pos] = shuffled[offset]
-            _relabel_option(block[pos], chr(65 + offset))
-        changed += len(group)
-    return changed, None
+        # Count all four payloads as shuffled when the order changed, not only labels
+        # whose letters differ from their source labels.
+        group_order_changed = any(a is not b for a, b in zip(original, shuffled))
+        for offset, (pos, option_element) in enumerate(zip(group, shuffled)):
+            old_match = OPTION_RE.match(_paragraph_text(option_element))
+            old_label = old_match.group(1).upper()
+            new_label = chr(65 + offset)
+            block[pos] = option_element
+            if not _relabel_option(option_element, new_label):
+                warnings.append(
+                    f"Bỏ qua gán nhãn cố định {new_label}: không sửa an toàn được nhãn của phương án {old_label}."
+                )
+                # The payload stays intact; do not silently claim this group is valid.
+                continue
+            mappings[old_label] = new_label
+        if group_order_changed:
+            changed += len(group)
+
+    return changed, "; ".join(warnings) if warnings else None, mappings
 
 
-def _relabel_option(element, label: str) -> None:
-    """Relabel the leading A./B./C./D. marker without rebuilding its paragraph XML."""
-    first = True
-    for node in element.iter(qn("w:t")):
-        value = node.text or ""
-        if not value:
-            continue
-        if first:
-            match = OPTION_RE.match(value)
-            if match:
-                node.text = re.sub(r"^\s*[A-D][.)]", f"{label}.", value, count=1)
-                if node.text.startswith(" ") or node.text.endswith(" "):
-                    node.set(qn("xml:space"), "preserve")
-            first = False
-            return
+def _relabel_option(element, label: str) -> bool:
+    """Change only the leading option letter, even when it is split across Word runs."""
+    nodes = list(element.iter(qn("w:t")))
+    values = [(node.text or "") for node in nodes]
+    full_text = "".join(values)
+    match = re.match(r"^\s*([A-D])[.)]", full_text)
+    if not match:
+        return False
+    target_offset = match.start(1)
+    cursor = 0
+    for node, value in zip(nodes, values):
+        next_cursor = cursor + len(value)
+        if cursor <= target_offset < next_cursor:
+            local = target_offset - cursor
+            node.text = value[:local] + label + value[local + 1:]
+            if node.text.startswith(" ") or node.text.endswith(" "):
+                node.set(qn("xml:space"), "preserve")
+            return True
+        cursor = next_cursor
+    return False
+
 
 def _replace_numpages_cache(docx_bytes: bytes, page_count: int) -> bytes:
     """Write the computed page count into the cached result of each NUMPAGES field."""
@@ -664,6 +690,36 @@ def _finalize_total_pages(docx_bytes: bytes) -> tuple[bytes, int | None, str | N
     return current, last_count, "Tổng số trang đã được tính nhưng chưa ổn định sau 3 lượt dàn trang; cần kiểm tra bằng Word."
 
 
+def _extract_source_answer_markers(children: list) -> dict[str, str]:
+    """Capture explicit ĐA:A/B/C/D markers before marker cleanup.
+
+    IDs mirror the exporter question IDs (ordinal within each detected section). Only
+    explicit A-D keys are captured; numeric short-answer keys are not interpreted as
+    multiple-choice labels.
+    """
+    answer_re = re.compile(r"\bĐA\s*:\s*([A-D])\b", re.I)
+    section = "P0"
+    counts: dict[str, int] = {}
+    current_qid: str | None = None
+    result: dict[str, str] = {}
+    for child in children:
+        text = _paragraph_text(child)
+        section_match = SECTION_RE.match(text)
+        if section_match:
+            section = f"P{section_match.group(1).upper()}"
+            current_qid = None
+            continue
+        number = _question_number(child)
+        if number is not None:
+            counts[section] = counts.get(section, 0) + 1
+            current_qid = f"Q-DOCX-{section}-{counts[section]}"
+        if current_qid:
+            marker = answer_re.search(_element_flat_text(child))
+            if marker:
+                result[current_qid] = marker.group(1).upper()
+    return result
+
+
 def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None, header: dict | None = None, section_modes: dict | None = None, seed: int | None = None) -> tuple[bytes, dict]:
     try:
         doc = Document(BytesIO(source))
@@ -674,6 +730,7 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     children = [child for child in list(body) if child.tag != qn("w:sectPr")]
     sect_pr = next((child for child in list(body) if child.tag == qn("w:sectPr")), None)
     children, source_header_blocks_removed = _remove_existing_generated_header(children)
+    source_answer_markers = _extract_source_answer_markers(children)
     # Resolve each section's default g0-g3 mode from source markers before cleaning them.
     marker_modes: dict[str, str] = {}
     current_section = "P0"
@@ -701,6 +758,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     rng = random.Random(seed)
     option_shuffle_count = 0
     option_shuffle_warnings: list[str] = []
+    option_label_mappings: dict[str, dict[str, str]] = {}
+    transformed_answer_key: dict[str, str] = {}
     # Remove standalone parser markers and the explicit trailing answer-key section.
     for child in children:
         _clean_marker_text(child)
@@ -878,10 +937,17 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                         warnings.extend(label_warnings)
                         _split_and_style_label_runs(block)
                         if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
-                            count, warning = _shuffle_options_in_block(block, rng)
+                            count, warning, label_mapping = _shuffle_options_in_block(block, rng)
                             option_shuffle_count += count
+                            if label_mapping:
+                                option_label_mappings[qid] = label_mapping
+                                source_answer = source_answer_markers.get(qid)
+                                if source_answer:
+                                    transformed_answer_key[qid] = label_mapping.get(source_answer, source_answer)
+                            elif qid in source_answer_markers:
+                                transformed_answer_key[qid] = source_answer_markers[qid]
                             if warning:
-                                option_shuffle_warnings.append(warning)
+                                option_shuffle_warnings.append(f"{qid}: {warning}")
                         if block and _replace_heading_number(block[0], new_number):
                             renumbered += 1
                         else:
@@ -944,6 +1010,10 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "true_false_items_shuffled": False,
         "word_fields_update_on_open": True,
         "option_shuffle_warnings": option_shuffle_warnings,
+        "option_label_mappings": option_label_mappings,
+        "source_answer_markers": source_answer_markers,
+        "transformed_answer_key": transformed_answer_key,
+        "option_labels_fixed_to_abcd": True,
         "page_number_added": True,
         "short_answer_inline_keys_removed": short_answer_keys_removed,
         "section_order_preserved": True,

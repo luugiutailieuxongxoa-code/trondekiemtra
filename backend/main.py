@@ -48,6 +48,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+    expose_headers=[
+        "X-YMP-Question-Count", "X-YMP-Renumbered-Count",
+        "X-YMP-Option-Paragraphs-Shuffled", "X-YMP-Option-Shuffle-Warning-Count",
+        "X-YMP-Transformed-Answer-Key", "X-YMP-Warning-Count",
+        "X-YMP-Total-Pages", "X-YMP-Page-Count-Method",
+    ],
 )
 
 
@@ -231,7 +237,9 @@ async def export_docx(
                 "X-YMP-Short-Answer-Keys-Removed": str(report["short_answer_inline_keys_removed"] > 0).lower(),
                 "X-YMP-Section-Order-Preserved": "true",
                 "X-YMP-Option-Paragraphs-Shuffled": str(report.get("option_paragraphs_shuffled", 0)),
-                "X-YMP-Warning-Count": str(len(report["warnings"])),
+                "X-YMP-Option-Shuffle-Warning-Count": str(len(report.get("option_shuffle_warnings", []))),
+                "X-YMP-Transformed-Answer-Key": json.dumps(report.get("transformed_answer_key", {}), ensure_ascii=False, separators=(",", ":")),
+                "X-YMP-Warning-Count": str(len(report["warnings"]) + len(report.get("option_shuffle_warnings", []))),
                 "X-YMP-Total-Pages": str(report.get("total_pages_cached") or "unknown"),
                 "X-YMP-Page-Count-Method": "server-render" if report.get("total_pages_counted_on_server") else "word-field-fallback",
                 "X-YMP-Source-Header-Blocks-Removed": str(report.get("source_header_blocks_removed", 0)),
