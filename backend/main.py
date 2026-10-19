@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,73 @@ async def export_docx(
             Path(temp_path).unlink(missing_ok=True)
         logger.exception("DOCX export failed")
         raise HTTPException(status_code=500, detail="Không thể xuất DOCX.") from exc
+    finally:
+        await file.close()
+
+
+@app.post("/api/exams/export-bundle")
+async def export_exam_bundle(
+    file: UploadFile = File(...),
+    question_order: str | None = None,
+    header: str | None = None,
+    section_modes: str | None = None,
+    answers: str | None = None,
+    exam_code: str = "001",
+    seed: int | None = None,
+) -> FileResponse:
+    """Export a source-preserving DOCX exam and an XLSX answer key in one ZIP."""
+    paths: list[str] = []
+    zip_path: str | None = None
+    try:
+        data = await read_limited_upload(file)
+        def parse_json_field(raw: str | None, expected, field_name: str, default):
+            if not raw:
+                return default
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail=f"{field_name} phải là JSON hợp lệ.") from exc
+            if not isinstance(value, expected):
+                raise HTTPException(status_code=422, detail=f"{field_name} không đúng cấu trúc.")
+            return value
+        order = parse_json_field(question_order, list, "question_order", None)
+        if order is not None and not all(isinstance(item, str) for item in order):
+            raise HTTPException(status_code=422, detail="question_order phải gồm ID câu dạng chuỗi.")
+        header_config = parse_json_field(header, dict, "header", {})
+        section_mode_config = parse_json_field(section_modes, dict, "section_modes", {})
+        answer_rows = parse_json_field(answers, list, "answers", [])
+        header_config = dict(header_config)
+        header_config["exam_code"] = str(exam_code).strip() or "001"
+        try:
+            docx_bytes, report = export_reordered_docx(data, order, header_config, section_mode_config, seed)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        def allocate_temp(suffix: str, prefix: str) -> str:
+            fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+            os.close(fd)
+            return path
+        exam_path = allocate_temp(".docx", "ymp-exam-")
+        xlsx_path = allocate_temp(".xlsx", "ymp-answers-")
+        zip_path = allocate_temp(".zip", "ymp-bundle-")
+        paths.extend([exam_path, xlsx_path, zip_path])
+        Path(exam_path).write_bytes(docx_bytes)
+        export_codes = [{"code": str(exam_code).strip() or "001", "questions": answer_rows}]
+        export_answer_key(export_codes, xlsx_path)
+        safe_code = "".join(ch for ch in str(exam_code) if ch.isalnum() or ch in "-_ ").strip().replace(" ", "-") or "001"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(exam_path, f"De-thi-ma-{safe_code}.docx")
+            archive.write(xlsx_path, f"Dap-an-ma-{safe_code}.xlsx")
+            if report.get("warnings") or report.get("option_shuffle_warnings"):
+                notes = report.get("warnings", []) + report.get("option_shuffle_warnings", [])
+                archive.writestr("CAN-KIEM-TRA.txt", "Cần kiểm tra trước khi phát hành:\n" + "\n".join(map(str, notes)))
+        return FileResponse(zip_path, filename=f"Young-Mix-Pro-ma-{safe_code}.zip", media_type="application/zip", background=BackgroundTask(lambda: [Path(x).unlink(missing_ok=True) for x in paths]))
+    except HTTPException:
+        for path in paths: Path(path).unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        for path in paths: Path(path).unlink(missing_ok=True)
+        logger.exception("ZIP export failed")
+        raise HTTPException(status_code=500, detail="Không thể đóng gói đề Word và đáp án Excel.") from exc
     finally:
         await file.close()
 
