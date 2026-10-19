@@ -126,19 +126,40 @@ def _clean_marker_text(element) -> bool:
 
 
 def _remove_answer_formatting(element) -> bool:
-    """Remove common visual correct-answer marks from A-D option paragraphs only."""
-    if element.tag != qn("w:p") or not OPTION_RE.match(_paragraph_text(element)):
+    """Remove answer-indicating formatting from A-D and a-d item paragraphs.
+
+    Keep only the leading option/item label bold for readability. Underline, bold,
+    font color, highlight, shading and character styles on answer content are treated
+    as answer markers and removed from the student paper.
+    """
+    if element.tag != qn("w:p"):
         return False
+    text = _paragraph_text(element)
+    upper = OPTION_RE.match(text)
+    lower = re.match(r"^\s*([a-d])[.)]\s*", text)
+    if not upper and not lower:
+        return False
+    label_end = (upper or lower).end()
     changed = False
+    offset = 0
     for run in element.iter(qn("w:r")):
+        run_text = "".join(t.text or "" for t in run.iter(qn("w:t")))
         rpr = run.find(qn("w:rPr"))
-        if rpr is None:
-            continue
-        for tag in ("w:rStyle", "w:b", "w:bCs", "w:i", "w:iCs", "w:u", "w:highlight", "w:shd", "w:color"):
-            node = rpr.find(qn(tag))
-            if node is not None:
-                rpr.remove(node)
-                changed = True
+        if rpr is not None:
+            for tag in ("w:rStyle", "w:b", "w:bCs", "w:i", "w:iCs", "w:u", "w:highlight", "w:shd", "w:color"):
+                node = rpr.find(qn(tag))
+                if node is not None:
+                    rpr.remove(node)
+                    changed = True
+        # The label itself stays bold; answer-content styling is stripped.
+        overlaps_label = offset < label_end and offset + len(run_text) > 0
+        if overlaps_label:
+            if rpr is None:
+                rpr = run.get_or_add_rPr()
+            from docx.oxml import OxmlElement
+            if rpr.find(qn("w:b")) is None:
+                rpr.append(OxmlElement("w:b")); changed = True
+        offset += len(run_text)
     return changed
 
 
