@@ -138,3 +138,12 @@ Trước khi sử dụng đề thi chính thức, hãy mở DOCX xuất bằng M
 - Gỡ các dấu định dạng thường dùng để đánh dấu đáp án đúng (đậm, nghiêng, gạch chân, màu chữ, tô sáng) trên các đoạn phương án A–D. Giữ lại nội dung phương án.
 - Nếu phát hiện tiêu đề phần đáp án riêng (`ĐÁP ÁN`/`ANSWER KEY`), phần từ tiêu đề đó đến cuối tài liệu được bỏ khỏi đề xuất ra.
 - Chưa xuất PDF; cần mở DOCX đầu ra kiểm tra trực quan trước khi sử dụng chính thức.
+
+## Giai đoạn 6 — làm sạch đáp án câu trả lời ngắn và chân trang chính thức
+
+- Trong phần có tiêu đề `PHẦN ... Câu trắc nghiệm trả lời ngắn`, xóa các dòng đáp án gợi ý dạng `A. 10`, `A. 25,5` nằm riêng thành đoạn. Quy tắc chỉ áp dụng trong phần trả lời ngắn; phương án `A.` của phần trắc nghiệm nhiều lựa chọn được giữ nguyên.
+- Bổ sung chân trang Word: `ĐỀ THI CHÍNH THỨC • Trang {PAGE}`; số trang dùng trường PAGE của Word để tự cập nhật khi mở/in tài liệu.
+- Cấu hình API hiển thị phiên bản `0.7.0` và các cờ tính năng chân trang/số trang/làm sạch đáp án ngắn.
+- Kiểm thử backend: `13 passed`.
+
+Lưu ý: quy tắc loại `A. ...` dựa vào tiêu đề phần có cụm “trả lời ngắn” và dòng đáp án đứng riêng. Cần kiểm tra đề thực tế nếu mẫu dùng tiêu đề khác hoặc đáp án được gõ cùng đoạn với nội dung câu hỏi.
