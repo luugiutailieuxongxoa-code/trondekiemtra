@@ -24,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -90,7 +90,7 @@ def public_config() -> dict[str, Any]:
         "features": {"docx_import": True, "pdf_import": False, "ocr": False,
                      "mix_api": True, "excel_export_basic": True,
                      "docx_export_source_preserving": True, "docx_section_aware_parse": True, "docx_source_mix_ui": True,
-                     "docx_official_header": True, "docx_answer_mark_cleanup": True, "pdf_export": False,
+                     "docx_official_header": True, "docx_answer_mark_cleanup": True, "docx_official_footer": True, "docx_page_numbers": True, "short_answer_inline_key_cleanup": True, "pdf_export": False,
                      "database": False, "authentication": False},
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
@@ -216,6 +216,9 @@ async def export_docx(
                 "X-YMP-Answer-Key-Section-Removed": str(report["answer_key_section_removed"]).lower(),
                 "X-YMP-Parser-Markers-Removed": str(report["parser_markers_removed"]).lower(),
                 "X-YMP-Official-Header-Added": str(report["official_header_added"]).lower(),
+                "X-YMP-Official-Footer-Added": str(report["official_footer_added"]).lower(),
+                "X-YMP-Page-Number-Added": str(report["page_number_added"]).lower(),
+                "X-YMP-Short-Answer-Keys-Removed": str(report["short_answer_inline_keys_removed"] > 0).lower(),
                 "X-YMP-Section-Order-Preserved": "true",
                 "X-YMP-Warning-Count": str(len(report["warnings"])),
             },

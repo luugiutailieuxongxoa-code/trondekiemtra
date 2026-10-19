@@ -22,6 +22,8 @@ G_MARKER_RE = re.compile(r"<\s*g\s*\d+\s*>", re.I)
 ANSWER_MARKER_RE = re.compile(r"\bĐA\s*:\s*[^\s;,.]+", re.I)
 ANSWER_KEY_RE = re.compile(r"^\s*(?:ĐÁP ÁN|ĐÁP ÁN THAM KHẢO|ĐÁP ÁN ĐỀ|ANSWER KEY)\b", re.I)
 OPTION_RE = re.compile(r"^\s*[A-D][.)]\s*", re.I)
+SHORT_ANSWER_HEADING_RE = re.compile(r"trả\s*lời\s*ngắn", re.I)
+SHORT_ANSWER_LEAK_RE = re.compile(r"^\s*A\.\s*\S.*$", re.I)
 
 
 def _paragraph_text(element) -> str:
@@ -99,6 +101,54 @@ def _set_run_font(run, name="Times New Roman", size=12, bold=None):
         run.bold = bold
 
 
+def _add_official_footer(section) -> None:
+    """Add an editable official-exam footer and Word PAGE field."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    p.clear()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(0)
+
+    left = p.add_run("ĐỀ THI CHÍNH THỨC  •  Trang ")
+    _set_run_font(left, size=9)
+    field_run = p.add_run()
+    _set_run_font(field_run, size=9)
+    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve"); instr.text = " PAGE "
+    separate = OxmlElement("w:fldChar"); separate.set(qn("w:fldCharType"), "separate")
+    display = OxmlElement("w:t"); display.text = "1"
+    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
+    field_run._r.append(begin); field_run._r.append(instr); field_run._r.append(separate); field_run._r.append(display); field_run._r.append(end)
+
+
+def _remove_short_answer_inline_keys(children: list) -> tuple[list, int]:
+    """Remove answer hints such as 'A. 10' in short-answer sections only.
+
+    In the user's source template, these are answer keys placed under a short-answer
+    question, not a multiple-choice option. The same pattern is preserved elsewhere.
+    """
+    result = []
+    in_short_answer = False
+    removed = 0
+    for child in children:
+        text = _paragraph_text(child)
+        if SECTION_RE.match(text):
+            in_short_answer = bool(SHORT_ANSWER_HEADING_RE.search(text))
+            result.append(child)
+            continue
+        if in_short_answer and child.tag == qn("w:p") and SHORT_ANSWER_LEAK_RE.match(text):
+            removed += 1
+            continue
+        result.append(child)
+    return result, removed
+
+
 def _add_official_header(doc, header: dict | None = None) -> None:
     """Prepend a standard editable Vietnamese exam header and set A4 print layout."""
     from docx.oxml import OxmlElement
@@ -119,6 +169,7 @@ def _add_official_header(doc, header: dict | None = None) -> None:
     section.bottom_margin = Cm(2)
     section.right_margin = Cm(2)
     section.left_margin = Cm(2.5)
+    _add_official_footer(section)
 
     table = doc.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -192,6 +243,7 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     for child in children:
         _clean_marker_text(child)
     children, answer_key_removed = _clean_answer_key_tail(children)
+    children, short_answer_keys_removed = _remove_short_answer_inline_keys(children)
     answer_marks_removed = False
     for child in children:
         if _remove_answer_formatting(child):
@@ -395,5 +447,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "answer_key_section_removed": answer_key_removed,
         "parser_markers_removed": True,
         "official_header_added": True,
+        "official_footer_added": True,
+        "page_number_added": True,
+        "short_answer_inline_keys_removed": short_answer_keys_removed,
         "section_order_preserved": True,
     }
