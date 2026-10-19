@@ -10,6 +10,13 @@ import re
 from io import BytesIO
 from typing import Sequence
 import random
+import os
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
+from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
@@ -29,6 +36,54 @@ SHORT_ANSWER_LEAK_RE = re.compile(r"^\s*A\.\s*\S.*$", re.I)
 
 def _paragraph_text(element) -> str:
     return "".join(node.text or "" for node in element.iter(qn("w:t"))).strip() if element.tag == qn("w:p") else ""
+
+
+def _element_flat_text(element) -> str:
+    """Return visible Word text for a paragraph, table, or other body element."""
+    return "".join(node.text or "" for node in element.iter(qn("w:t"))).strip()
+
+
+def _remove_existing_generated_header(children: list) -> tuple[list, int]:
+    """Remove a recognizable prior exam header before inserting the configured header.
+
+    Earlier exports can already contain the Young Mix Pro title table and candidate lines.
+    Keeping those blocks and prepending a new template creates two headers and may leave a
+    stale subject (for example HÓA HỌC on a Toán paper). Only recognized header elements
+    before the first PHẦN heading are removed; question content is never touched.
+    """
+    first_section = next((i for i, child in enumerate(children)
+                          if SECTION_RE.match(_paragraph_text(child))), None)
+    if first_section is None:
+        return children, 0
+    prefix = children[:first_section]
+    prefix_text = " ".join(_element_flat_text(el).lower() for el in prefix)
+    has_prior_header = any(marker in prefix_text for marker in (
+        "đề thi gồm", "đề thi chính thức", "mã đề:", "họ và tên thí sinh", "số báo danh"
+    ))
+    if not has_prior_header:
+        return children, 0
+
+    header_line_re = re.compile(
+        r"^\s*(?:SỞ\s+GD|THPT\b|TRƯỜNG\b|ĐỀ\s+(?:KIỂM TRA|THI)\b|"
+        r"Năm học\b|Khối/Lớp\b|Môn\s*:|Thời gian làm bài\s*:|"
+        r"Đề thi gồm\b|ĐỀ THI CHÍNH THỨC\b|Mã đề\s*:|"
+        r"Họ và tên thí sinh\s*:|Số báo danh\s*:)", re.I
+    )
+    kept = []
+    removed = 0
+    for index, child in enumerate(children):
+        text = _element_flat_text(child)
+        is_before_section = index < first_section
+        is_header_table = child.tag == qn("w:tbl") and is_before_section and any(
+            marker in text.lower() for marker in ("đề thi gồm", "đề thi chính thức", "mã đề:")
+        )
+        is_header_line = is_before_section and child.tag == qn("w:p") and header_line_re.match(text)
+        is_blank_prefix = is_before_section and child.tag == qn("w:p") and not text
+        if is_header_table or is_header_line or is_blank_prefix:
+            removed += 1
+            continue
+        kept.append(child)
+    return kept, removed
 
 
 def _question_number(element) -> int | None:
@@ -343,41 +398,60 @@ def _restore_true_false_subitem_order(block: list) -> tuple[int, list[str]]:
             warnings.append("Không tự sắp xếp tiểu ý đúng/sai: nhóm a)-d) không đủ 4 nhãn riêng biệt.")
     return changed, warnings
 
-def _normalize_and_bold_option_labels(block: list) -> tuple[int, int]:
-    """Normalize option labels A-D in reading order and bold A-D/a-d labels.
+def _normalize_and_bold_option_labels(block: list) -> tuple[int, int, list[str]]:
+    """Normalize only a complete four-option set; never wrap labels modulo four.
 
-    Works even when Word splits labels, punctuation, equations, tabs or drawings across
-    multiple runs. Option labels are normalized only in paragraphs that begin with A-D.
+    Word tables and inline two-column layouts are traversed in document/XML order. If
+    exactly four explicit A-D markers are found in the question block, their labels are
+    normalized to A, B, C, D in that order while keeping each text run and its content
+    in place. If the marker count is incomplete/ambiguous, labels are only bolded and a
+    warning is returned instead of silently creating duplicate or misleading labels.
+    Lowercase a)-d) markers are processed separately and never count as A-D options.
     """
-    option_index = 0
     changed = 0
     bolded = 0
+    warnings: list[str] = []
+    option_markers = []
+    paragraphs_seen = set()
     for element in block:
         paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
         for paragraph in paragraphs:
+            if id(paragraph) in paragraphs_seen:
+                continue
+            paragraphs_seen.add(id(paragraph))
             text, spans = _paragraph_text_nodes(paragraph)
+            # A paragraph must begin with an uppercase option label. Additional labels
+            # in the same paragraph are allowed for side-by-side A/B and C/D layouts.
             if not re.match(r"^\s*[A-D][.)]", text):
                 continue
             for match in OPTION_MARKER_IN_TEXT_RE.finditer(text):
-                letter_offset = match.start(2)
-                normalized = chr(65 + (option_index % 4))
-                if normalized != match.group(2):
-                    changed += int(_bold_label_at_offset(spans, letter_offset, normalized))
-                else:
-                    _bold_label_at_offset(spans, letter_offset)
-                option_index += 1
-                bolded += 1
-    # True/false subitems a), b), c), d) are bolded but their labels are not renumbered.
+                option_markers.append((paragraph, spans, match.start(2), match.group(2)))
+
+    can_normalize = len(option_markers) == 4
+    if option_markers and not can_normalize:
+        warnings.append(
+            f"Không tự chuẩn hóa nhãn A-D: phát hiện {len(option_markers)} nhãn trong một khối câu; cần kiểm tra cấu trúc phương án."
+        )
+    for index, (paragraph, spans, offset, original_label) in enumerate(option_markers):
+        replacement = chr(65 + index) if can_normalize else None
+        if _bold_label_at_offset(spans, offset, replacement):
+            bolded += 1
+            if replacement is not None and replacement != original_label:
+                changed += 1
+
+    # Bold true/false subitems but never relabel or shuffle them as A-D options.
     for element in block:
         paragraphs = [element] if element.tag == qn("w:p") else list(element.iter(qn("w:p")))
         for paragraph in paragraphs:
+            if id(paragraph) in paragraphs_seen and paragraph.tag != qn("w:p"):
+                continue
             text, spans = _paragraph_text_nodes(paragraph)
-            if not re.match(r"^\s*[a-d][.)]", text, re.I):
+            if not re.match(r"^\s*[a-d][.)]", text):
                 continue
             for match in TF_MARKER_IN_TEXT_RE.finditer(text):
                 if _bold_label_at_offset(spans, match.start(2)):
                     bolded += 1
-    return changed, bolded
+    return changed, bolded, warnings
 
 
 def _split_and_style_label_runs(block: list) -> None:
@@ -501,6 +575,95 @@ def _relabel_option(element, label: str) -> None:
             first = False
             return
 
+def _replace_numpages_cache(docx_bytes: bytes, page_count: int) -> bytes:
+    """Write the computed page count into the cached result of each NUMPAGES field."""
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(BytesIO(docx_bytes), "r") as src:
+        files = [(item, src.read(item.filename)) for item in src.infolist()]
+    updated_files = []
+    changed = False
+    for item, payload in files:
+        if item.filename != "word/document.xml":
+            updated_files.append((item, payload))
+            continue
+        root = etree.fromstring(payload)
+        for paragraph in root.xpath(".//w:p", namespaces=ns):
+            field_instruction = ""
+            phase = ""
+            for node in paragraph.iter():
+                if node.tag == f"{{{ns['w']}}}fldChar":
+                    kind = node.get(f"{{{ns['w']}}}fldCharType", "")
+                    if kind == "begin":
+                        field_instruction, phase = "", "instruction"
+                    elif kind == "separate" and phase:
+                        phase = "result"
+                    elif kind == "end":
+                        field_instruction, phase = "", ""
+                elif node.tag == f"{{{ns['w']}}}instrText" and phase == "instruction":
+                    field_instruction += node.text or ""
+                elif node.tag == f"{{{ns['w']}}}t" and phase == "result" and "NUMPAGES" in field_instruction.upper():
+                    node.text = str(page_count)
+                    changed = True
+                    phase = "result_done"
+        updated_files.append((item, etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)))
+    if not changed:
+        return docx_bytes
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for item, payload in updated_files:
+            dst.writestr(item, payload)
+    return out.getvalue()
+
+
+def _render_docx_page_count(docx_bytes: bytes) -> tuple[int | None, str | None]:
+    """Count pages with LibreOffice + pdfinfo; gracefully fall back if unavailable."""
+    office = shutil.which("libreoffice") or shutil.which("soffice")
+    pdfinfo = shutil.which("pdfinfo")
+    if not office or not pdfinfo:
+        return None, "Không có LibreOffice/pdfinfo trên máy chủ; NUMPAGES sẽ được Word cập nhật khi mở tài liệu."
+    try:
+        with tempfile.TemporaryDirectory(prefix="ymp-pagecount-") as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "exam.docx"
+            source_path.write_bytes(docx_bytes)
+            profile = root / "lo-profile"
+            command = [office, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--convert-to", "pdf", "--outdir", str(root), str(source_path)]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+            pdf_path = root / "exam.pdf"
+            if result.returncode != 0 or not pdf_path.exists():
+                detail = (result.stderr or result.stdout or "LibreOffice không tạo được PDF.").strip()[-400:]
+                return None, f"Không đếm được số trang tự động: {detail}"
+            info = subprocess.run([pdfinfo, str(pdf_path)], capture_output=True, text=True, timeout=15, check=False)
+            match = re.search(r"^Pages:\s+(\d+)\s*$", info.stdout, re.MULTILINE)
+            if info.returncode != 0 or not match:
+                return None, "pdfinfo không trả về số trang hợp lệ."
+            return int(match.group(1)), None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"Không đếm được số trang tự động: {type(exc).__name__}."
+
+
+def _finalize_total_pages(docx_bytes: bytes) -> tuple[bytes, int | None, str | None]:
+    """Compute and cache total pages, repeating if the cached value changes pagination."""
+    current = docx_bytes
+    last_count = None
+    for _ in range(3):
+        count, warning = _render_docx_page_count(current)
+        if count is None:
+            return current, last_count, warning
+        updated = _replace_numpages_cache(current, count)
+        last_count = count
+        if updated == current:
+            return current, count, None
+        verify_count, verify_warning = _render_docx_page_count(updated)
+        if verify_count == count:
+            return updated, count, None
+        if verify_count is None:
+            return updated, count, verify_warning or warning
+        current = _replace_numpages_cache(updated, verify_count)
+        last_count = verify_count
+    return current, last_count, "Tổng số trang đã được tính nhưng chưa ổn định sau 3 lượt dàn trang; cần kiểm tra bằng Word."
+
+
 def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None, header: dict | None = None, section_modes: dict | None = None, seed: int | None = None) -> tuple[bytes, dict]:
     try:
         doc = Document(BytesIO(source))
@@ -510,6 +673,7 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     body = doc.element.body
     children = [child for child in list(body) if child.tag != qn("w:sectPr")]
     sect_pr = next((child for child in list(body) if child.tag == qn("w:sectPr")), None)
+    children, source_header_blocks_removed = _remove_existing_generated_header(children)
     # Resolve each section's default g0-g3 mode from source markers before cleaning them.
     marker_modes: dict[str, str] = {}
     current_section = "P0"
@@ -710,7 +874,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                         # four-item group is present; never shuffle these items implicitly.
                         tf_groups_restored, tf_order_warnings = _restore_true_false_subitem_order(block)
                         warnings.extend(tf_order_warnings)
-                        normalized_options, bolded_labels = _normalize_and_bold_option_labels(block)
+                        normalized_options, bolded_labels, label_warnings = _normalize_and_bold_option_labels(block)
+                        warnings.extend(label_warnings)
                         _split_and_style_label_runs(block)
                         if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
                             count, warning = _shuffle_options_in_block(block, rng)
@@ -750,7 +915,12 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     _enable_field_updates(doc)
     out = BytesIO()
     doc.save(out)
-    return out.getvalue(), {
+    finalized_bytes, total_pages, page_count_warning = _finalize_total_pages(out.getvalue())
+    if page_count_warning:
+        # Do not hide a failed server-side page count; expose a clear diagnostic to the UI/logs.
+        logger = __import__("logging").getLogger("young-mix-pro-api")
+        logger.warning("DOCX total-page count fallback: %s", page_count_warning)
+    return finalized_bytes, {
         "question_count": len(requested),
         "renumbered_count": renumbered,
         "warnings": warnings,
@@ -759,9 +929,13 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "answer_key_section_removed": answer_key_removed,
         "parser_markers_removed": True,
         "official_header_added": True,
+        "source_header_blocks_removed": source_header_blocks_removed,
         "official_footer_added": True,
         "footer_contains_only_code_and_page": True,
         "total_pages_field_in_header": True,
+        "total_pages_cached": total_pages,
+        "total_pages_counted_on_server": total_pages is not None,
+        "page_count_warning": page_count_warning,
         "official_title_in_header": True,
         "section_modes": effective_modes,
         "option_paragraphs_shuffled": option_shuffle_count,

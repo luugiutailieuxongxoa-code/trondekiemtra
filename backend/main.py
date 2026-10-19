@@ -24,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -232,6 +232,9 @@ async def export_docx(
                 "X-YMP-Section-Order-Preserved": "true",
                 "X-YMP-Option-Paragraphs-Shuffled": str(report.get("option_paragraphs_shuffled", 0)),
                 "X-YMP-Warning-Count": str(len(report["warnings"])),
+                "X-YMP-Total-Pages": str(report.get("total_pages_cached") or "unknown"),
+                "X-YMP-Page-Count-Method": "server-render" if report.get("total_pages_counted_on_server") else "word-field-fallback",
+                "X-YMP-Source-Header-Blocks-Removed": str(report.get("source_header_blocks_removed", 0)),
             },
             background=BackgroundTask(Path(temp_path).unlink, missing_ok=True),
         )

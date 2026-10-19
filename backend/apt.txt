@@ -1,0 +1,4 @@
+libreoffice-writer
+poppler-utils
+fonts-liberation
+fonts-dejavu-core
