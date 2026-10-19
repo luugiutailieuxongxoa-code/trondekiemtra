@@ -220,3 +220,35 @@ def test_export_docx_adds_official_header_and_removes_g_markers_and_answer_marks
     assert not run.bold
     assert not run.underline
     assert run.font.color.rgb is None
+
+
+def test_export_removes_A_value_lines_only_in_short_answer_section_and_adds_footer_page_field():
+    from zipfile import ZipFile
+    doc = Document()
+    doc.add_paragraph("PHẦN I. Câu trắc nghiệm nhiều phương án lựa chọn")
+    doc.add_paragraph("Câu 1. Chọn phương án đúng?")
+    doc.add_paragraph("A. Phương án A")
+    doc.add_paragraph("B. Phương án B")
+    doc.add_paragraph("PHẦN III. Câu trắc nghiệm trả lời ngắn. Thí sinh trả lời từ câu 1 đến câu 2.")
+    doc.add_paragraph("Câu 1. Tính giá trị biểu thức.")
+    doc.add_paragraph("A. 10")
+    doc.add_paragraph("Câu 2. Tính kết quả.")
+    doc.add_paragraph("A. 25,5")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("short-answer.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    all_text = "\n".join(p.text for p in out.paragraphs)
+    assert "A. Phương án A" in all_text
+    assert "A. 10" not in all_text
+    assert "A. 25,5" not in all_text
+    assert out.sections[0].footer.paragraphs
+    footer_text = "".join(p.text for p in out.sections[0].footer.paragraphs)
+    assert "ĐỀ THI CHÍNH THỨC" in footer_text
+    # PAGE is stored as a Word field instruction rather than plain paragraph text.
+    with ZipFile(BytesIO(response.content)) as archive:
+        footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+    assert "PAGE" in footer_xml
