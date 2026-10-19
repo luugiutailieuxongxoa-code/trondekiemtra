@@ -6,7 +6,7 @@ import {
   Plus, RefreshCw, Search, Settings2, ShieldCheck, Shuffle, Smartphone, Sparkles,
   Table2, Trash2, Upload, X
 } from "lucide-react";
-import { apiFetch } from "./services/api";
+import ... from './api';
 
 type QuestionType = "multiple_choice" | "true_false" | "short_answer" | "essay";
 type Level = "Biết" | "Hiểu" | "Vận dụng";
