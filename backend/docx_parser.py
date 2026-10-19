@@ -1,7 +1,7 @@
-"""Conservative DOCX structure scanner for Young Mix Pro.
+"""DOCX structure scanner for Young Mix Pro.
 
-Extracts review metadata from Word body blocks while leaving the original DOCX bytes
-available for source-preserving export. It does not claim OCR or semantic formula parsing.
+The parser creates a reviewable question index while the original DOCX remains the
+source of truth for images, equations, tables, drawings and embedded objects.
 """
 from __future__ import annotations
 import re
@@ -11,7 +11,9 @@ from docx.oxml.ns import qn
 
 QRE = re.compile(r"^\s*Câu\s*(\d+)\s*[.:)]?\s*(.*)$", re.I)
 ORE = re.compile(r"^\s*([A-D])\s*[.)]\s*(.*)$", re.I)
-SECTION_RE = re.compile(r"^\s*PHẦN\s+([IVX]+|\d+)\b", re.I)
+TFRE = re.compile(r"^\s*([a-d])\s*[.)]\s*(.*)$", re.I)
+SECTION_RE = re.compile(r"^\s*(?:<g\d+>\s*)?PHẦN\s+([IVXLCDM]+|\d+)\b", re.I)
+END_RE = re.compile(r"^\s*(?:[-—– ]*HẾT[-—– ]*|[-—– ]*KẾT THÚC[-—– ]*)\s*$", re.I)
 
 
 def _text(el) -> str:
@@ -23,12 +25,18 @@ def _has_drawing(el) -> bool:
 
 
 def _body_blocks(doc):
-    """Yield direct body elements in their original order (paragraphs and tables)."""
     body = doc.element.body
     for el in body:
-        if el.tag == qn("w:sectPr"):
-            continue
-        yield el
+        if el.tag != qn("w:sectPr"):
+            yield el
+
+
+def _section_type(section: str) -> str:
+    if section == "PII":
+        return "true_false"
+    if section == "PIII":
+        return "short_answer"
+    return "multiple_choice"
 
 
 def parse_docx(content: bytes):
@@ -40,33 +48,36 @@ def parse_docx(content: bytes):
     blocks = list(_body_blocks(doc))
     questions = []
     section = "P0"
+    section_titles: dict[str, str] = {}
     section_counts: dict[str, int] = {}
     current = None
     all_text = []
-    image_count = 0
     table_count = 0
 
     def flush():
         nonlocal current
         if current is not None:
-            current["text"] = "\n".join(x for x in current["_lines"] if x).strip()
-            current.pop("_lines", None)
+            current["text"] = "\n".join(x for x in current.pop("_lines", []) if x).strip()
             questions.append(current)
             current = None
 
     for block in blocks:
-        if block.tag == qn("w:tbl"):
+        is_table = block.tag == qn("w:tbl")
+        if is_table:
             table_count += 1
-            # Tables remain attached to the current question on export; include readable
-            # table text in preview metadata only when a question is active.
+            # Include visible text and mark media inside tables as belonging to the active
+            # question. The original table remains intact in the source DOCX used for export.
             table_text = " | ".join(t.strip() for t in _text(block).splitlines() if t.strip())
-            if current and table_text:
-                current["_lines"].append(table_text)
+            if current:
+                current["has_table"] = True
+                if _has_drawing(block):
+                    current["has_image"] = True
+                if table_text:
+                    current["_lines"].append(table_text)
             continue
 
         text = _text(block)
-        if _has_drawing(block):
-            image_count += 1
+        has_image = _has_drawing(block)
         if text:
             all_text.append(text)
         sec = SECTION_RE.match(text) if text else None
@@ -74,7 +85,9 @@ def parse_docx(content: bytes):
             flush()
             roman = sec.group(1).upper()
             section = f"P{roman}"
+            section_titles[section] = text
             continue
+
         q = QRE.match(text) if text else None
         if q:
             flush()
@@ -87,7 +100,8 @@ def parse_docx(content: bytes):
                 "number": number,
                 "source_number": number,
                 "section": section,
-                "type": "multiple_choice",
+                "section_title": section_titles.get(section, ""),
+                "type": _section_type(section),
                 "topic": "Chưa phân loại",
                 "level": "Chưa xác định",
                 "text": "",
@@ -95,48 +109,65 @@ def parse_docx(content: bytes):
                 "answer": None,
                 "points": 0,
                 "group": "g0",
-                "has_image": False,
+                "has_image": has_image,
+                "has_table": False,
                 "review_required": True,
                 "_lines": [q.group(2).strip()] if q.group(2).strip() else [],
             }
             continue
+
         if current:
-            if _has_drawing(block):
+            if has_image:
                 current["has_image"] = True
-            opt = ORE.match(text) if text else None
-            if opt:
-                current["options"].append({
-                    "id": f"{current['id']}-O{opt.group(1).upper()}",
-                    "label": opt.group(1).upper(),
-                    "text": opt.group(2).strip(),
-                })
-            elif text:
-                current["_lines"].append(text)
+            if text:
+                option = TFRE.match(text) if current["type"] == "true_false" else ORE.match(text)
+                if option:
+                    current["options"].append({
+                        "id": f"{current['id']}-O{option.group(1).upper()}",
+                        "label": option.group(1).upper(),
+                        "text": option.group(2).strip(),
+                    })
+                elif not END_RE.match(text):
+                    current["_lines"].append(text)
 
     flush()
-    # Images embedded in the main document XML, including diagrams inside tables.
+
     try:
         image_count = len(doc.part._element.xpath(".//pic:pic"))
     except Exception:
-        image_count = 0
+        image_count = sum(1 for b in blocks if _has_drawing(b))
+
+    section_summary = []
+    for sec in dict.fromkeys(q["section"] for q in questions):
+        qs = [q for q in questions if q["section"] == sec]
+        section_summary.append({
+            "id": sec,
+            "title": section_titles.get(sec) or ("Phần chưa xác định" if sec == "P0" else f"Phần {sec[1:]}"),
+            "question_count": len(qs),
+            "question_numbers": [q["source_number"] for q in qs],
+            "type": qs[0]["type"],
+            "image_count": sum(1 for q in qs if q["has_image"]),
+            "table_count": sum(1 for q in qs if q["has_table"]),
+        })
 
     warnings = [
-        "Đây là nhận diện cấu trúc sơ bộ; giáo viên cần đối chiếu với DOCX gốc trước khi trộn.",
-        "Công thức OMML/MathType, ảnh nổi, biểu đồ và nội dung OLE được giữ trong DOCX nguồn khi xuất theo chế độ bảo toàn nguồn; chúng không được chuyển đổi đầy đủ thành văn bản xem trước.",
-        "Đáp án đúng không được tự suy luận. Hãy xác nhận đáp án và cách đánh dấu đáp án trước khi phát hành đề.",
+        "Đây là nhận diện cấu trúc để hỗ trợ trộn; giáo viên cần đối chiếu với DOCX gốc trước khi phát hành.",
+        "Hình ảnh, công thức OMML/MathType, bảng và đối tượng nhúng được bảo toàn bằng cách xuất lại từ DOCX nguồn; phần xem trước không tái dựng chính xác các đối tượng này.",
+        "Đáp án đúng không được tự suy luận. Cần xác nhận đáp án trước khi phát hành đề.",
     ]
     if image_count:
-        warnings.append(f"Phát hiện khoảng {image_count} đối tượng hình/đồ họa; cần kiểm tra hình có đi cùng đúng câu sau khi xuất.")
+        warnings.append(f"Phát hiện {image_count} hình/đồ họa trong tài liệu nguồn.")
     if table_count:
-        warnings.append(f"Phát hiện {table_count} bảng trong DOCX; nội dung bảng được giữ ở cấp XML nhưng cần kiểm tra trực quan.")
+        warnings.append(f"Phát hiện {table_count} bảng trong tài liệu nguồn.")
     if not questions:
-        warnings.append("Chưa nhận diện được tiêu đề câu theo dạng 'Câu 1.', 'Câu 2.'; có thể tài liệu dùng bố cục hoặc hộp văn bản chưa hỗ trợ.")
+        warnings.append("Không nhận diện được tiêu đề câu trong đoạn văn chính. Tài liệu có thể dùng hộp văn bản, cột hoặc bảng để chứa câu hỏi; cần kiểm tra thủ công.")
 
     return {
         "question_count": len(questions),
         "image_count": image_count,
         "table_count": table_count,
-        "sections": sorted({q["section"] for q in questions}, key=lambda s: (s == "P0", s)),
+        "sections": [s["id"] for s in section_summary],
+        "section_summary": section_summary,
         "questions": questions,
         "warnings": warnings,
         "review_required": True,
