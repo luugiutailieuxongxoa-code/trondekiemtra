@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from pathlib import Path
 import sys
 import re
@@ -302,7 +303,7 @@ def test_export_g3_shuffles_labeled_option_paragraphs_and_relabels_them():
     assert response.headers["x-ymp-option-paragraphs-shuffled"] == "4"
 
 
-def test_export_normalizes_duplicate_option_labels_and_bolds_labels_only():
+def test_export_preserves_source_option_labels_and_bolds_labels_only():
     from zipfile import ZipFile
     doc = Document()
     doc.add_paragraph("PHẦN I. Câu trắc nghiệm nhiều phương án lựa chọn")
@@ -324,10 +325,11 @@ def test_export_normalizes_duplicate_option_labels_and_bolds_labels_only():
     q1 = next(i for i,p in enumerate(out.paragraphs) if p.text.startswith("Câu 1. Chọn"))
     option_paras = [p for p in out.paragraphs[q1+1:] if p.text.startswith(("A.","B.","C.","D."))]
     text = " ".join(p.text for p in option_paras)
+    # Labels in side-by-side source paragraphs are not rewritten from flattened XML order.
     assert "A. Phương án một" in text
-    assert "B. Phương án bốn" in text
-    assert "C. Phương án hai" in text
-    assert "D. Phương án ba" in text
+    assert "D. Phương án bốn" in text
+    assert "B. Phương án hai" in text
+    assert "B. Phương án ba" in text
     for paragraph in option_paras:
         label = next(r for r in paragraph.runs if r.text.strip())
         assert label.bold is True
@@ -457,3 +459,57 @@ def test_export_does_not_cycle_labels_when_option_count_is_ambiguous():
     options = [p.text for p in out.paragraphs if re.match(r"^[A-D][.)]", p.text)]
     assert [p[0] for p in options] == ["A", "D", "B", "B", "C"]
     assert int(response.headers["x-ymp-warning-count"]) >= 1
+
+
+def test_g3_updates_explicit_answer_marker_after_fixed_slot_option_shuffle():
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều lựa chọn")
+    doc.add_paragraph("Câu 1. Chọn đáp án đúng")
+    doc.add_paragraph("A. ALPHA")
+    doc.add_paragraph("B. BETA")
+    doc.add_paragraph("C. GAMMA")
+    doc.add_paragraph("D. DELTA")
+    doc.add_paragraph("ĐA:B")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("answer-map.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"seed": "42"},
+    )
+    assert response.status_code == 200, response.text
+    mapping = json.loads(response.headers["x-ymp-transformed-answer-key"])
+    assert "Q-DOCX-PI-1" in mapping
+    assert mapping["Q-DOCX-PI-1"] in {"A", "B", "C", "D"}
+    out = Document(BytesIO(response.content))
+    options = [p.text for p in out.paragraphs if re.match(r"^[A-D][.)]", p.text)]
+    assert len(options) == 4
+    assert [p[0] for p in options] == ["A", "B", "C", "D"]
+    # Original answer B points to BETA; after shuffling the returned answer must point
+    # to the fixed label now assigned to the BETA payload.
+    beta_label = next(p[0] for p in options if "BETA" in p)
+    assert mapping["Q-DOCX-PI-1"] == beta_label
+    # The source marker is removed from the student paper, but its transformed answer is returned.
+    assert not any("ĐA:" in p.text for p in out.paragraphs)
+
+
+def test_g3_skips_inline_two_column_options_instead_of_guessing():
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm")
+    doc.add_paragraph("Câu 1. Chọn")
+    doc.add_paragraph("A. ALPHA\tC. GAMMA")
+    doc.add_paragraph("B. BETA\tD. DELTA")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post(
+        "/api/exams/export-docx",
+        files={"file": ("inline-options.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        params={"seed": "42"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["x-ymp-option-paragraphs-shuffled"] == "0"
+    out = Document(BytesIO(response.content))
+    texts = [p.text for p in out.paragraphs]
+    assert "A. ALPHA\tC. GAMMA" in texts
+    assert "B. BETA\tD. DELTA" in texts
+    assert int(response.headers["x-ymp-option-shuffle-warning-count"]) >= 1
