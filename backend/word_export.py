@@ -11,10 +11,17 @@ from io import BytesIO
 from typing import Sequence
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 
 QUESTION_RE = re.compile(r"^\s*Câu\s*(\d+)\s*[.:)]?", re.IGNORECASE)
 SECTION_RE = re.compile(r"^\s*(?:<g\d+>\s*)?PHẦN\s+([IVXLCDM]+|\d+)\b", re.IGNORECASE)
 END_RE = re.compile(r"\s*(?:[-—– ]*HẾT[-—– ]*|[-—– ]*KẾT THÚC[-—– ]*)\s*", re.I)
+G_MARKER_RE = re.compile(r"<\s*g\s*\d+\s*>", re.I)
+ANSWER_MARKER_RE = re.compile(r"\bĐA\s*:\s*[^\s;,.]+", re.I)
+ANSWER_KEY_RE = re.compile(r"^\s*(?:ĐÁP ÁN|ĐÁP ÁN THAM KHẢO|ĐÁP ÁN ĐỀ|ANSWER KEY)\b", re.I)
+OPTION_RE = re.compile(r"^\s*[A-D][.)]\s*", re.I)
 
 
 def _paragraph_text(element) -> str:
@@ -46,7 +53,133 @@ def _section_key(text: str, current: str) -> str:
     return f"P{match.group(1).upper()}" if match else current
 
 
-def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None) -> tuple[bytes, dict]:
+def _clean_marker_text(element) -> bool:
+    """Remove parser-only <g1>/<g2>/<g3> and inline ĐA:... markers from text nodes."""
+    changed = False
+    for node in element.iter(qn("w:t")):
+        value = node.text or ""
+        cleaned = ANSWER_MARKER_RE.sub("", G_MARKER_RE.sub("", value))
+        if cleaned != value:
+            node.text = cleaned
+            changed = True
+            if cleaned.startswith(" ") or cleaned.endswith(" "):
+                node.set(qn("xml:space"), "preserve")
+    return changed
+
+
+def _remove_answer_formatting(element) -> bool:
+    """Remove common visual correct-answer marks from A-D option paragraphs only."""
+    if element.tag != qn("w:p") or not OPTION_RE.match(_paragraph_text(element)):
+        return False
+    changed = False
+    for run in element.iter(qn("w:r")):
+        rpr = run.find(qn("w:rPr"))
+        if rpr is None:
+            continue
+        for tag in ("w:rStyle", "w:b", "w:bCs", "w:i", "w:iCs", "w:u", "w:highlight", "w:shd", "w:color"):
+            node = rpr.find(qn(tag))
+            if node is not None:
+                rpr.remove(node)
+                changed = True
+    return changed
+
+
+def _set_run_font(run, name="Times New Roman", size=12, bold=None):
+    run.font.name = name
+    run.font.size = Pt(size)
+    rpr = run._element.get_or_add_rPr()
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        from docx.oxml import OxmlElement
+        rfonts = OxmlElement("w:rFonts")
+        rpr.insert(0, rfonts)
+    for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+        rfonts.set(qn(f"w:{attr}"), name)
+    if bold is not None:
+        run.bold = bold
+
+
+def _add_official_header(doc, header: dict | None = None) -> None:
+    """Prepend a standard editable Vietnamese exam header and set A4 print layout."""
+    from docx.oxml import OxmlElement
+    header = header or {}
+    department = str(header.get("department") or "[SỞ GD&ĐT]")
+    school = str(header.get("school") or "[TÊN TRƯỜNG]")
+    exam_title = str(header.get("exam_title") or "ĐỀ KIỂM TRA")
+    grade = str(header.get("grade") or "[KHỐI/LỚP]")
+    school_year = str(header.get("school_year") or "[NĂM HỌC]")
+    subject = str(header.get("subject") or "[MÔN THI]")
+    duration = str(header.get("duration") or "[THỜI GIAN LÀM BÀI]")
+    exam_code = str(header.get("exam_code") or "001")
+
+    section = doc.sections[0]
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.right_margin = Cm(2)
+    section.left_margin = Cm(2.5)
+
+    table = doc.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    table.columns[0].width = Cm(7.4)
+    table.columns[1].width = Cm(9.6)
+    left, right = table.rows[0].cells
+    left.width = Cm(7.4); right.width = Cm(9.6)
+    for cell in (left, right):
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        tc_pr = cell._tc.get_or_add_tcPr()
+        borders = OxmlElement("w:tcBorders")
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            el = OxmlElement(f"w:{edge}"); el.set(qn("w:val"), "nil"); borders.append(el)
+        tc_pr.append(borders)
+    left.text = ""
+    p = left.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for idx, value in enumerate((department, school)):
+        if idx:
+            p = left.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(value.upper()); _set_run_font(r, size=11, bold=True)
+    right.text = ""
+    p = right.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(exam_title.upper()); _set_run_font(r, size=12, bold=True)
+    p = right.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"Năm học {school_year} · Khối/Lớp {grade}"); _set_run_font(r, size=11, bold=True)
+    p = right.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"Môn: {subject}"); _set_run_font(r, size=11, bold=True)
+    p = right.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"Thời gian làm bài: {duration}"); _set_run_font(r, size=10)
+
+    # Move table to the beginning of the document body.
+    body = doc.element.body
+    body.remove(table._tbl)
+    body.insert(0, table._tbl)
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"Mã đề: {exam_code}"); _set_run_font(r, size=11, bold=True)
+    body.remove(p._p)
+    body.insert(1, p._p)
+    p2 = doc.add_paragraph("Họ và tên thí sinh: ............................................................  Số báo danh: ....................")
+    for r in p2.runs: _set_run_font(r, size=11)
+    body.remove(p2._p)
+    body.insert(2, p2._p)
+    # Add a small gap after the candidate line, before source exam content.
+    gap = doc.add_paragraph("")
+    body.remove(gap._p)
+    body.insert(3, gap._p)
+
+
+def _clean_answer_key_tail(children: list) -> tuple[list, bool]:
+    """Remove a trailing answer-key section, if explicitly headed as such."""
+    for idx, child in enumerate(children):
+        text = _paragraph_text(child)
+        if ANSWER_KEY_RE.match(text):
+            return children[:idx], True
+    return children, False
+
+
+def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = None, header: dict | None = None) -> tuple[bytes, dict]:
     try:
         doc = Document(BytesIO(source))
     except Exception as exc:
@@ -55,6 +188,19 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     body = doc.element.body
     children = [child for child in list(body) if child.tag != qn("w:sectPr")]
     sect_pr = next((child for child in list(body) if child.tag == qn("w:sectPr")), None)
+    # Remove standalone parser markers and the explicit trailing answer-key section.
+    for child in children:
+        _clean_marker_text(child)
+    children, answer_key_removed = _clean_answer_key_tail(children)
+    answer_marks_removed = False
+    for child in children:
+        if _remove_answer_formatting(child):
+            answer_marks_removed = True
+    # Drop empty paragraphs left behind by standalone <g1>/<g2>/<g3> markers.
+    children = [child for child in children if not (
+        child.tag == qn("w:p") and not _paragraph_text(child).strip()
+        and not child.xpath('.//w:drawing | .//w:pict | .//w:object | .//m:oMath | .//m:oMathPara')
+    )]
 
     # Segment by section headings first, so headings remain fixed and can never be moved
     # into another section when question blocks are reordered.
@@ -236,6 +382,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
     if sect_pr is not None and sect_pr.getparent() is not body:
         body.append(sect_pr)
 
+    # Rebuild body using cleaned elements, then prepend the official exam template.
+    _add_official_header(doc, header)
     out = BytesIO()
     doc.save(out)
     return out.getvalue(), {
@@ -243,6 +391,9 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "renumbered_count": renumbered,
         "warnings": warnings,
         "preserves_source_xml": True,
-        "answer_markings_removed": False,
+        "answer_markings_removed": answer_marks_removed,
+        "answer_key_section_removed": answer_key_removed,
+        "parser_markers_removed": True,
+        "official_header_added": True,
         "section_order_preserved": True,
     }
