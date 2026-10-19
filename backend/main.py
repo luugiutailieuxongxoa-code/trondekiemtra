@@ -24,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -89,7 +89,7 @@ def public_config() -> dict[str, Any]:
         "version": VERSION,
         "features": {"docx_import": True, "pdf_import": False, "ocr": False,
                      "mix_api": True, "excel_export_basic": True,
-                     "docx_export_source_preserving": True, "docx_section_aware_parse": True, "pdf_export": False,
+                     "docx_export_source_preserving": True, "docx_section_aware_parse": True, "docx_source_mix_ui": True, "pdf_export": False,
                      "database": False, "authentication": False},
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }

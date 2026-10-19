@@ -13,7 +13,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 QUESTION_RE = re.compile(r"^\s*Câu\s*(\d+)\s*[.:)]?", re.IGNORECASE)
-SECTION_RE = re.compile(r"^\s*PHẦN\s+([IVX]+|\d+)\b", re.IGNORECASE)
+SECTION_RE = re.compile(r"^\s*(?:<g\d+>\s*)?PHẦN\s+([IVXLCDM]+|\d+)\b", re.IGNORECASE)
 END_RE = re.compile(r"\s*(?:[-—– ]*HẾT[-—– ]*|[-—– ]*KẾT THÚC[-—– ]*)\s*", re.I)
 
 
