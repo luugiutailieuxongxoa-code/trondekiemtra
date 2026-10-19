@@ -398,6 +398,93 @@ def _restore_true_false_subitem_order(block: list) -> tuple[int, list[str]]:
             warnings.append("Không tự sắp xếp tiểu ý đúng/sai: nhóm a)-d) không đủ 4 nhãn riêng biệt.")
     return changed, warnings
 
+def _shuffle_true_false_items_in_block(block: list, rng: random.Random) -> tuple[int, list[str], dict[str, str]]:
+    """Shuffle complete a)-d) paragraph payloads, retaining fixed label slots.
+
+    Only a contiguous group of four top-level paragraphs with unique a/b/c/d labels
+    is considered safe. Paragraphs containing OMML, images and runs move as intact XML.
+    Inline/table groups are not guessed. Mapping is old label -> new label.
+    """
+    moved = 0
+    warnings: list[str] = []
+    mapping: dict[str, str] = {}
+    i = 0
+    while i < len(block):
+        el = block[i]
+        if el.tag != qn("w:p"):
+            i += 1
+            continue
+        text = _paragraph_text(el)
+        match = re.match(r"^\s*([a-d])[.)](?=\s|$)", text)
+        if not match:
+            # A lowercase marker embedded in one paragraph is unsafe to split.
+            if TF_MARKER_IN_TEXT_RE.search(text):
+                warnings.append("Bỏ qua trộn ý đúng/sai: nhiều ý a)-d) nằm chung một đoạn.")
+            i += 1
+            continue
+        start = i
+        group: list[tuple[str, object]] = []
+        while i < len(block) and block[i].tag == qn("w:p"):
+            m = re.match(r"^\s*([a-d])[.)](?=\s|$)", _paragraph_text(block[i]))
+            if not m:
+                break
+            group.append((m.group(1), block[i]))
+            i += 1
+        labels = [x[0] for x in group]
+        if len(group) != 4 or set(labels) != set("abcd"):
+            warnings.append("Bỏ qua trộn ý đúng/sai: cần đủ 4 đoạn riêng biệt, nhãn a), b), c), d) không lặp.")
+            continue
+        # Only paragraphs at this exact level are accepted; table-contained items are
+        # intentionally not flattened into an unsafe guessed sequence.
+        shuffled = group[:]
+        rng.shuffle(shuffled)
+        if any(group[j][1] is not shuffled[j][1] for j in range(4)):
+            moved += 4
+        relabelled: list[object] = []
+        local_mapping: dict[str, str] = {}
+        safe = True
+        for index, (old_label, element) in enumerate(shuffled):
+            new_label = "abcd"[index]
+            if not _relabel_tf_item(element, new_label):
+                safe = False
+                break
+            relabelled.append(element)
+            local_mapping[old_label] = new_label
+        if not safe:
+            warnings.append("Bỏ qua trộn ý đúng/sai: không sửa được nhãn an toàn; giữ nguyên nhóm.")
+            # Restore original labels in original elements if any label was already changed.
+            for old_label, element in group:
+                _relabel_tf_item(element, old_label)
+            continue
+        block[start:start + 4] = relabelled
+        mapping.update(local_mapping)
+    return moved, warnings, mapping
+
+
+def _relabel_tf_item(element, label: str) -> bool:
+    """Change only the leading lowercase label, even when Word splits it into runs."""
+    nodes = list(element.iter(qn("w:t")))
+    full = "".join(node.text or "" for node in nodes)
+    m = re.match(r"^\s*([a-d])[.)]", full)
+    if not m:
+        return False
+    target = m.start(1)
+    cursor = 0
+    for node in nodes:
+        value = node.text or ""
+        if cursor <= target < cursor + len(value):
+            local = target - cursor
+            node.text = value[:local] + label + value[local + 1:]
+            if node.text.startswith(" ") or node.text.endswith(" "):
+                node.set(qn("xml:space"), "preserve")
+            run = node.getparent()
+            if run is not None and run.tag == qn("w:r"):
+                _set_run_bold(run, True)
+            return True
+        cursor += len(value)
+    return False
+
+
 def _normalize_and_bold_option_labels(block: list) -> tuple[int, int, list[str]]:
     """Bold existing option labels without rewriting their identities.
 
@@ -757,6 +844,8 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                 effective_modes[str(key)] = str(value)
     rng = random.Random(seed)
     option_shuffle_count = 0
+    tf_shuffle_count = 0
+    tf_item_mappings: dict[str, dict[str, str]] = {}
     option_shuffle_warnings: list[str] = []
     option_label_mappings: dict[str, dict[str, str]] = {}
     transformed_answer_key: dict[str, str] = {}
@@ -928,15 +1017,16 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
                     for new_number, qid in enumerate(chosen, start=1):
                         block = blocks[qid]
                         q_section = next((it["section"] for it in question_starts if it["id"] == qid), sec)
-                        # True/false subitems default to a), b), c), d) order.
-                        # Restore by their existing labels only when a complete, unambiguous
-                        # four-item group is present; never shuffle these items implicitly.
-                        tf_groups_restored, tf_order_warnings = _restore_true_false_subitem_order(block)
-                        warnings.extend(tf_order_warnings)
                         normalized_options, bolded_labels, label_warnings = _normalize_and_bold_option_labels(block)
                         warnings.extend(label_warnings)
                         _split_and_style_label_runs(block)
                         if effective_modes.get(q_section, "g0") in {"g2", "g3"}:
+                            tf_count, tf_warnings, tf_mapping = _shuffle_true_false_items_in_block(block, rng)
+                            tf_shuffle_count += tf_count
+                            if tf_mapping:
+                                tf_item_mappings[qid] = tf_mapping
+                            option_shuffle_warnings.extend(f"{qid}: {message}" for message in tf_warnings)
+                            warnings.extend(f"{qid}: {message}" for message in tf_warnings)
                             count, warning, label_mapping = _shuffle_options_in_block(block, rng)
                             option_shuffle_count += count
                             if label_mapping:
@@ -1006,8 +1096,10 @@ def export_reordered_docx(source: bytes, question_order: Sequence[str] | None = 
         "section_modes": effective_modes,
         "option_paragraphs_shuffled": option_shuffle_count,
         "option_labels_normalized_and_bolded": True,
-        "true_false_groups_restored_to_abcd_order": True,
-        "true_false_items_shuffled": False,
+        "true_false_groups_restored_to_abcd_order": False,
+        "true_false_items_shuffled": tf_shuffle_count > 0,
+        "true_false_item_paragraphs_shuffled": tf_shuffle_count,
+        "true_false_item_label_mappings": tf_item_mappings,
         "word_fields_update_on_open": True,
         "option_shuffle_warnings": option_shuffle_warnings,
         "option_label_mappings": option_label_mappings,
