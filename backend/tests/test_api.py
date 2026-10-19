@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 import sys
+import re
 
 from docx import Document
 from fastapi.testclient import TestClient
@@ -200,7 +201,7 @@ def test_export_docx_adds_official_header_and_removes_g_markers_and_answer_marks
     response = client.post(
         "/api/exams/export-docx",
         files={"file": ("sample.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
-        params={"header": '{"department":"SỞ GD&ĐT ĐỒNG NAI","school":"THPT THỐNG NHẤT B","exam_title":"KIỂM TRA CUỐI KỲ","grade":"12","school_year":"2026-2027","subject":"HÓA HỌC","duration":"45","exam_code":"007"}'},
+        params={"header": '{"department":"SỞ GD&ĐT ĐỒNG NAI","school":"THPT THỐNG NHẤT B","exam_title":"KIỂM TRA CUỐI KỲ","grade":"12","school_year":"2026-2027","subject":"HÓA HỌC","duration":"45","exam_code":"007"}', "section_modes": '{"PI":"g0"}'},
     )
     assert response.status_code == 200, response.text
     assert response.headers["x-ymp-answer-markings-removed"] == "true"
@@ -247,8 +248,51 @@ def test_export_removes_A_value_lines_only_in_short_answer_section_and_adds_foot
     assert "A. 25,5" not in all_text
     assert out.sections[0].footer.paragraphs
     footer_text = "".join(p.text for p in out.sections[0].footer.paragraphs)
-    assert "ĐỀ THI CHÍNH THỨC" in footer_text
-    # PAGE is stored as a Word field instruction rather than plain paragraph text.
+    assert "ĐỀ THI CHÍNH THỨC" not in footer_text
+    assert "Mã đề: 001" in footer_text
+    # Header carries live NUMPAGES and official designation; footer only has code + PAGE.
     with ZipFile(BytesIO(response.content)) as archive:
         footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+        document_xml = archive.read("word/document.xml").decode("utf-8")
     assert "PAGE" in footer_xml
+    assert "NUMPAGES" in document_xml
+    assert "ĐỀ THI CHÍNH THỨC" in document_xml
+    assert "ĐỀ THI CHÍNH THỨC" not in footer_xml
+
+
+def test_parser_reads_g3_marker_for_section_and_maps_part_four_to_essay():
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm nhiều lựa chọn")
+    doc.add_paragraph("Câu 1. Chọn đáp án đúng")
+    doc.add_paragraph("A. Một")
+    doc.add_paragraph("B. Hai")
+    doc.add_paragraph("PHẦN IV. Tự luận")
+    doc.add_paragraph("Câu 1. Trình bày")
+    buf = BytesIO(); doc.save(buf)
+    result = client.post("/api/exams/parse", files={"file": ("markers.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["questions"][0]["group"] == "g3"
+    assert body["questions"][-1]["type"] == "essay"
+    assert body["section_summary"][0]["group"] == "g3"
+
+
+def test_export_g3_shuffles_labeled_option_paragraphs_and_relabels_them():
+    doc = Document()
+    doc.add_paragraph("<g3>")
+    doc.add_paragraph("PHẦN I. Trắc nghiệm")
+    doc.add_paragraph("Câu 1. Chọn")
+    doc.add_paragraph("A. OPTION_ALPHA")
+    doc.add_paragraph("B. OPTION_BETA")
+    doc.add_paragraph("C. OPTION_GAMMA")
+    doc.add_paragraph("D. OPTION_DELTA")
+    buf = BytesIO(); doc.save(buf)
+    response = client.post("/api/exams/export-docx", files={"file": ("shuffle.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}, params={"seed":"42"})
+    assert response.status_code == 200, response.text
+    out = Document(BytesIO(response.content))
+    options = [p.text for p in out.paragraphs if re.match(r"^[A-D][.)]", p.text)]
+    assert len(options) == 4
+    assert [p[0] for p in options] == ["A", "B", "C", "D"]
+    assert {p[3:] for p in options} == {"OPTION_ALPHA", "OPTION_BETA", "OPTION_GAMMA", "OPTION_DELTA"}
+    assert response.headers["x-ymp-option-paragraphs-shuffled"] == "4"
