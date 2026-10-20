@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +24,7 @@ from word_export import export_reordered_docx
 import json
 from models import MixRequest
 
-VERSION = "0.9.0"
+VERSION = "0.8.0"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("young-mix-pro-api")
@@ -49,12 +48,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
-    expose_headers=[
-        "X-YMP-Question-Count", "X-YMP-Renumbered-Count",
-        "X-YMP-Option-Paragraphs-Shuffled", "X-YMP-Option-Shuffle-Warning-Count",
-        "X-YMP-Transformed-Answer-Key", "X-YMP-Warning-Count",
-        "X-YMP-Total-Pages", "X-YMP-Page-Count-Method",
-    ],
 )
 
 
@@ -71,15 +64,6 @@ async def request_logging(request: Request, call_next):
             status_code=500,
             content={"detail": "Lỗi máy chủ không xác định.", "code": "INTERNAL_ERROR"},
         )
-
-
-@app.get("/api/templates/source-exam")
-def download_source_exam_template():
-    """Download the editable DOCX template for authoring original exams."""
-    template = Path(__file__).parent / "templates" / "Mau_de_goc_Young_Mix_Pro.docx"
-    if not template.exists():
-        raise HTTPException(status_code=404, detail="Chưa có file mẫu đề gốc.")
-    return FileResponse(template, filename="Mau_de_goc_Young_Mix_Pro.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 @app.get("/")
@@ -247,12 +231,7 @@ async def export_docx(
                 "X-YMP-Short-Answer-Keys-Removed": str(report["short_answer_inline_keys_removed"] > 0).lower(),
                 "X-YMP-Section-Order-Preserved": "true",
                 "X-YMP-Option-Paragraphs-Shuffled": str(report.get("option_paragraphs_shuffled", 0)),
-                "X-YMP-Option-Shuffle-Warning-Count": str(len(report.get("option_shuffle_warnings", []))),
-                "X-YMP-Transformed-Answer-Key": json.dumps(report.get("transformed_answer_key", {}), ensure_ascii=False, separators=(",", ":")),
-                "X-YMP-Warning-Count": str(len(report["warnings"]) + len(report.get("option_shuffle_warnings", []))),
-                "X-YMP-Total-Pages": str(report.get("total_pages_cached") or "unknown"),
-                "X-YMP-Page-Count-Method": "server-render" if report.get("total_pages_counted_on_server") else "word-field-fallback",
-                "X-YMP-Source-Header-Blocks-Removed": str(report.get("source_header_blocks_removed", 0)),
+                "X-YMP-Warning-Count": str(len(report["warnings"])),
             },
             background=BackgroundTask(Path(temp_path).unlink, missing_ok=True),
         )
@@ -265,73 +244,6 @@ async def export_docx(
             Path(temp_path).unlink(missing_ok=True)
         logger.exception("DOCX export failed")
         raise HTTPException(status_code=500, detail="Không thể xuất DOCX.") from exc
-    finally:
-        await file.close()
-
-
-@app.post("/api/exams/export-bundle")
-async def export_exam_bundle(
-    file: UploadFile = File(...),
-    question_order: str | None = None,
-    header: str | None = None,
-    section_modes: str | None = None,
-    answers: str | None = None,
-    exam_code: str = "001",
-    seed: int | None = None,
-) -> FileResponse:
-    """Export a source-preserving DOCX exam and an XLSX answer key in one ZIP."""
-    paths: list[str] = []
-    zip_path: str | None = None
-    try:
-        data = await read_limited_upload(file)
-        def parse_json_field(raw: str | None, expected, field_name: str, default):
-            if not raw:
-                return default
-            try:
-                value = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise HTTPException(status_code=422, detail=f"{field_name} phải là JSON hợp lệ.") from exc
-            if not isinstance(value, expected):
-                raise HTTPException(status_code=422, detail=f"{field_name} không đúng cấu trúc.")
-            return value
-        order = parse_json_field(question_order, list, "question_order", None)
-        if order is not None and not all(isinstance(item, str) for item in order):
-            raise HTTPException(status_code=422, detail="question_order phải gồm ID câu dạng chuỗi.")
-        header_config = parse_json_field(header, dict, "header", {})
-        section_mode_config = parse_json_field(section_modes, dict, "section_modes", {})
-        answer_rows = parse_json_field(answers, list, "answers", [])
-        header_config = dict(header_config)
-        header_config["exam_code"] = str(exam_code).strip() or "001"
-        try:
-            docx_bytes, report = export_reordered_docx(data, order, header_config, section_mode_config, seed)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        def allocate_temp(suffix: str, prefix: str) -> str:
-            fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
-            os.close(fd)
-            return path
-        exam_path = allocate_temp(".docx", "ymp-exam-")
-        xlsx_path = allocate_temp(".xlsx", "ymp-answers-")
-        zip_path = allocate_temp(".zip", "ymp-bundle-")
-        paths.extend([exam_path, xlsx_path, zip_path])
-        Path(exam_path).write_bytes(docx_bytes)
-        export_codes = [{"code": str(exam_code).strip() or "001", "questions": answer_rows}]
-        export_answer_key(export_codes, xlsx_path)
-        safe_code = "".join(ch for ch in str(exam_code) if ch.isalnum() or ch in "-_ ").strip().replace(" ", "-") or "001"
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(exam_path, f"De-thi-ma-{safe_code}.docx")
-            archive.write(xlsx_path, f"Dap-an-ma-{safe_code}.xlsx")
-            if report.get("warnings") or report.get("option_shuffle_warnings"):
-                notes = report.get("warnings", []) + report.get("option_shuffle_warnings", [])
-                archive.writestr("CAN-KIEM-TRA.txt", "Cần kiểm tra trước khi phát hành:\n" + "\n".join(map(str, notes)))
-        return FileResponse(zip_path, filename=f"Young-Mix-Pro-ma-{safe_code}.zip", media_type="application/zip", background=BackgroundTask(lambda: [Path(x).unlink(missing_ok=True) for x in paths]))
-    except HTTPException:
-        for path in paths: Path(path).unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        for path in paths: Path(path).unlink(missing_ok=True)
-        logger.exception("ZIP export failed")
-        raise HTTPException(status_code=500, detail="Không thể đóng gói đề Word và đáp án Excel.") from exc
     finally:
         await file.close()
 
