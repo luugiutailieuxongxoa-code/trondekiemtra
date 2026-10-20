@@ -16,3 +16,8 @@
 .header-settings summary { cursor: pointer; margin-bottom: 12px; }
 .section-mode-settings > b { display: block; margin-bottom: 6px; }
 .section-mode-settings > p { margin: 0 0 12px; color: var(--muted, #666); font-size: 13px; line-height: 1.45; }
+
+/* Phase 20: keep the Word + Excel ZIP download controls visible on the Exports page. */
+.export-page-download { margin-bottom: 18px; }
+.export-page-download .field { margin-top: 10px; }
+.export-page-download input, .export-page-download select { max-width: 420px; }
