@@ -22,6 +22,9 @@ from engine import mix_exam
 from export_excel import export_answer_key
 from word_export import export_reordered_docx
 import json
+import re
+import zipfile
+from io import BytesIO
 from models import MixRequest
 
 VERSION = "0.8.0"
@@ -244,6 +247,113 @@ async def export_docx(
             Path(temp_path).unlink(missing_ok=True)
         logger.exception("DOCX export failed")
         raise HTTPException(status_code=500, detail="Không thể xuất DOCX.") from exc
+    finally:
+        await file.close()
+
+
+@app.post("/api/exams/export-bundle")
+async def export_bundle(
+    file: UploadFile = File(...),
+    question_order: str | None = None,
+    header: str | None = None,
+    section_modes: str | None = None,
+    answers: str | None = None,
+    exam_code: str = "001",
+    seed: int | None = None,
+    answer_layout: str = "vertical",
+) -> FileResponse:
+    """Return one ZIP containing the source-preserving Word exam and its Excel key.
+
+    The exam code is user-editable and is used consistently in the Word header,
+    Excel answer sheet and filenames. Answers are never inferred by this endpoint.
+    """
+    temp_path: str | None = None
+    try:
+        code = str(exam_code or "").strip()
+        if not code or len(code) > 32 or not re.fullmatch(r"[A-Za-z0-9_-]+", code):
+            raise HTTPException(status_code=422, detail="Mã đề chỉ được gồm chữ, số, dấu gạch ngang hoặc gạch dưới (tối đa 32 ký tự).")
+        data = await read_limited_upload(file)
+
+        def parse_json_param(value: str | None, name: str, expected: type):
+            if not value:
+                return None
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail=f"{name} phải là JSON hợp lệ.") from exc
+            if not isinstance(parsed, expected):
+                raise HTTPException(status_code=422, detail=f"{name} có kiểu dữ liệu không hợp lệ.")
+            return parsed
+
+        order = parse_json_param(question_order, "question_order", list)
+        if order is not None and not all(isinstance(item, str) for item in order):
+            raise HTTPException(status_code=422, detail="question_order phải chứa ID câu hỏi dạng chuỗi.")
+        header_config = parse_json_param(header, "header", dict) or {}
+        header_config["exam_code"] = code
+        modes = parse_json_param(section_modes, "section_modes", dict) or {}
+        answer_rows = parse_json_param(answers, "answers", list)
+        if not answer_rows:
+            raise HTTPException(status_code=422, detail="Không có dữ liệu đáp án để xuất. Hãy tạo mã đề và kiểm tra đáp án trước.")
+        normalized_answers = []
+        for index, item in enumerate(answer_rows):
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=422, detail="Mỗi đáp án phải là một đối tượng.")
+            normalized_answers.append({
+                "number": item.get("number", index + 1),
+                "type": item.get("type", "multiple_choice"),
+                "answer": item.get("answer") if item.get("answer") not in ("Chưa xác nhận", "") else None,
+                "points": item.get("points", ""),
+            })
+
+        try:
+            docx_bytes, report = export_reordered_docx(data, order, header_config, modes, seed)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        with tempfile.TemporaryDirectory(prefix="ymp-bundle-") as tmp:
+            tmpdir = Path(tmp)
+            docx_path = tmpdir / f"De-thi-ma-{code}.docx"
+            xlsx_path = tmpdir / f"Dap-an-ma-{code}.xlsx"
+            zip_path = tmpdir / f"Young-Mix-Pro-ma-{code}.zip"
+            docx_path.write_bytes(docx_bytes)
+            export_answer_key([{"code": code, "questions": normalized_answers}], xlsx_path, layout=answer_layout)
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(docx_path, arcname=docx_path.name)
+                archive.write(xlsx_path, arcname=xlsx_path.name)
+                if report.get("warnings"):
+                    warning_path = tmpdir / "CAN-KIEM-TRA.txt"
+                    warning_path.write_text("Các cảnh báo khi xuất đề:\n" + "\n".join(f"- {w}" for w in report["warnings"]), encoding="utf-8")
+                    archive.write(warning_path, arcname=warning_path.name)
+            # Move out of temporary directory so FileResponse can stream it, then clean after response.
+            handle = tempfile.NamedTemporaryFile(prefix="ymp-bundle-", suffix=".zip", delete=False)
+            temp_path = handle.name
+            handle.close()
+            Path(temp_path).write_bytes(zip_path.read_bytes())
+        return FileResponse(
+            temp_path,
+            filename=f"Young-Mix-Pro-ma-{code}.zip",
+            media_type="application/zip",
+            headers={
+                "X-YMP-Exam-Code": code,
+                "X-YMP-Question-Count": str(report.get("question_count", len(normalized_answers))),
+                "X-YMP-Warning-Count": str(len(report.get("warnings", []))),
+                "X-YMP-Answer-Layout": answer_layout,
+            },
+            background=BackgroundTask(Path(temp_path).unlink, missing_ok=True),
+        )
+    except HTTPException:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+        raise
+    except ValueError as exc:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+        logger.exception("Bundle export failed")
+        raise HTTPException(status_code=500, detail="Không thể tạo ZIP đề Word và đáp án Excel.") from exc
     finally:
         await file.close()
 
